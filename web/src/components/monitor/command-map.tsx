@@ -1,29 +1,20 @@
-import { Button } from '@/components/ui/button'
+import { Background, BackgroundVariant, Controls, ReactFlow } from '@xyflow/react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { cn } from '@/lib/utils'
 import { useMemo } from 'react'
-import type { CommandMapModel, CommandMapNode } from '@/lib/command-map/types'
+import type { CommandMapModel } from '@/lib/command-map/types'
 import { CommandMapToolbar } from './command-map-toolbar'
 import { CommandMapInspector } from './command-map-inspector'
 import { useCommandMapState } from './use-command-map-state'
+import { commandMapNodeTypes } from './node-renderers'
+import { useNodeLayout } from './use-node-layout'
 
 interface CommandMapProps {
   model: CommandMapModel
 }
 
-function nodeTone(node: CommandMapNode): string {
-  if (node.kind === 'eve') {
-    if (node.status === 'error') return 'border-red-400/40 bg-red-400/10 text-red-100'
-    if (node.status === 'warning') return 'border-amber-400/40 bg-amber-400/10 text-amber-100'
-    return 'border-emerald-400/40 bg-emerald-400/10 text-emerald-100'
-  }
-  if (node.kind === 'alert') return 'border-red-400/40 bg-red-400/10 text-red-100'
-  if (node.kind === 'trigger') return 'border-amber-400/40 bg-amber-400/10 text-amber-100'
-  return 'border-border/30 bg-card/60 text-foreground/90'
-}
-
 export function CommandMap({ model }: CommandMapProps) {
   const {
+    selectedNodeId,
     selectedNode,
     isDecluttered,
     isFocused,
@@ -36,19 +27,32 @@ export function CommandMap({ model }: CommandMapProps) {
     resetView,
   } = useCommandMapState(model.nodes)
 
-  const edges = model.edges.filter(edge => visibleNodes.some(node => node.id === edge.source) && visibleNodes.some(node => node.id === edge.target))
-  const connectedNodeIds = useMemo(() => {
-    if (!selectedNode || !isFocused) return new Set<string>()
+  const edges = useMemo(() => {
+    const visibleNodeIds = new Set(visibleNodes.map(node => node.id))
+    return model.edges.filter(edge => visibleNodeIds.has(edge.source) && visibleNodeIds.has(edge.target))
+  }, [model.edges, visibleNodes])
 
-    const connected = new Set<string>([selectedNode.id])
-    for (const edge of edges) {
-      if (edge.source === selectedNode.id) connected.add(edge.target)
-      if (edge.target === selectedNode.id) connected.add(edge.source)
-    }
+  const {
+    flowNodes,
+    flowEdges,
+    onNodesChange,
+    onEdgesChange,
+    onNodeDragStop,
+    resetLayout,
+    hasPinnedNodes,
+  } = useNodeLayout({
+    nodes: visibleNodes,
+    allNodes: model.nodes,
+    edges,
+    selectedNodeId,
+    isFocused,
+    onSelectNode: selectNode,
+  })
 
-    return connected
-  }, [edges, isFocused, selectedNode])
-  const displayedEdges = isFocused && selectedNode ? edges.filter(edge => edge.source === selectedNode.id || edge.target === selectedNode.id) : edges
+  function handleReset() {
+    resetView()
+    resetLayout()
+  }
 
   return (
     <div className="flex min-h-[calc(100vh-9rem)] flex-col gap-4">
@@ -60,7 +64,7 @@ export function CommandMap({ model }: CommandMapProps) {
         onToggleLayer={toggleLayer}
         onToggleDeclutter={toggleDeclutter}
         onToggleFocus={toggleFocus}
-        onReset={resetView}
+        onReset={handleReset}
       />
 
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_20rem]">
@@ -70,46 +74,35 @@ export function CommandMap({ model }: CommandMapProps) {
               Command Map
             </CardTitle>
           </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-              {visibleNodes.map(node => (
-                <Button
-                  key={node.id}
-                  type="button"
-                  variant={node.id === selectedNode?.id ? 'default' : 'outline'}
-                  onClick={() => selectNode(node.id)}
-                  className={cn(
-                    'h-auto min-h-24 flex-col items-start justify-start gap-1 rounded-xl border p-3 text-left font-mono',
-                    nodeTone(node),
-                    node.id === selectedNode?.id && 'ring-2 ring-primary/40',
-                    isFocused && selectedNode && !connectedNodeIds.has(node.id) && 'opacity-45',
-                  )}
-                  aria-pressed={node.id === selectedNode?.id}
-                  aria-label={node.label}
-                >
-                  <span className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground/70">
-                    {node.kind} · ring {node.ring}
-                  </span>
-                  <span className="text-base font-semibold">{node.label}</span>
-                  {node.subtitle && <span className="text-xs text-muted-foreground/70">{node.subtitle}</span>}
-                </Button>
-              ))}
+          <CardContent className="relative h-[36rem] overflow-hidden p-0">
+            <div className="pointer-events-none absolute left-4 top-4 z-10 rounded-lg border border-border/20 bg-background/70 px-3 py-2 font-mono text-[11px] uppercase tracking-[0.18em] text-muted-foreground/70 backdrop-blur">
+              {flowNodes.length} nodes · {flowEdges.length} edges
+              {hasPinnedNodes && <span className="ml-2 text-foreground/80">Pinned layout active</span>}
             </div>
 
-            <div className="rounded-xl border border-border/20 bg-background/40 p-3 font-mono text-xs text-muted-foreground/60">
-              <div className="mb-2 uppercase tracking-[0.2em] text-muted-foreground/50">Edges</div>
-              {displayedEdges.length > 0 ? (
-                <ul className="space-y-1">
-                  {displayedEdges.map(edge => (
-                    <li key={edge.id}>
-                      {edge.source} → {edge.target}
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p>No active edges in the current layer selection.</p>
-              )}
-            </div>
+            <ReactFlow
+              nodes={flowNodes}
+              edges={flowEdges}
+              nodeTypes={commandMapNodeTypes}
+              onNodesChange={onNodesChange}
+              onEdgesChange={onEdgesChange}
+              onNodeDragStop={onNodeDragStop}
+              fitView
+              minZoom={0.35}
+              maxZoom={1.8}
+              nodesConnectable={false}
+              elementsSelectable={false}
+              zoomOnDoubleClick={false}
+              className="bg-[radial-gradient(circle_at_top,rgba(10,132,255,0.08),transparent_35%),linear-gradient(180deg,rgba(255,255,255,0.02),transparent_65%)]"
+            >
+              <Background
+                variant={BackgroundVariant.Dots}
+                gap={20}
+                size={1}
+                color="rgba(148, 163, 184, 0.18)"
+              />
+              <Controls showInteractive={false} />
+            </ReactFlow>
           </CardContent>
         </Card>
 

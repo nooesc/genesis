@@ -1,7 +1,72 @@
-import { fireEvent, render, screen } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import type { ComponentType, ReactNode } from 'react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { CommandMap } from './command-map'
 import type { CommandMapModel } from '@/lib/command-map/types'
+import {
+  loadCommandMapPinnedPositions,
+  saveCommandMapPinnedPositions,
+} from '@/lib/command-map/storage'
+import { installStorageMock } from '@/test/storage-mock'
+
+vi.mock('@xyflow/react', async () => {
+  const ReactModule = await import('react')
+
+  return {
+    Background: () => null,
+    BackgroundVariant: { Dots: 'dots' },
+    Controls: () => null,
+    Handle: () => null,
+    MarkerType: { ArrowClosed: 'arrowclosed' },
+    Position: { Top: 'top', Bottom: 'bottom' },
+    ReactFlow: ({
+      nodes,
+      nodeTypes,
+      onNodeDragStop,
+      children,
+    }: {
+      nodes: Array<{ id: string; type: string; data: unknown; position: { x: number; y: number } }>
+      nodeTypes: Record<string, ComponentType<{ id: string; data: unknown }>>
+      onNodeDragStop?: (event: unknown, node: { id: string; position: { x: number; y: number } }) => void
+      children?: ReactNode
+    }) => (
+      <div data-testid="react-flow">
+        {nodes.map(node => {
+          const NodeComponent = nodeTypes[node.type]
+          return (
+            <div key={node.id} data-testid={`node-${node.id}`}>
+              <NodeComponent id={node.id} data={node.data} />
+              {onNodeDragStop && (
+                <button
+                  type="button"
+                  aria-label={`Drag ${node.id}`}
+                  onClick={() => onNodeDragStop(null, {
+                    id: node.id,
+                    position: {
+                      x: node.position.x + 48,
+                      y: node.position.y + 24,
+                    },
+                  })}
+                >
+                  Drag {node.id}
+                </button>
+              )}
+            </div>
+          )
+        })}
+        {children}
+      </div>
+    ),
+    useEdgesState: (initialEdges: unknown[]) => {
+      const [edges, setEdges] = ReactModule.useState(initialEdges)
+      return [edges, setEdges, vi.fn()] as const
+    },
+    useNodesState: (initialNodes: unknown[]) => {
+      const [nodes, setNodes] = ReactModule.useState(initialNodes)
+      return [nodes, setNodes, vi.fn()] as const
+    },
+  }
+})
 
 const model: CommandMapModel = {
   nodes: [
@@ -66,10 +131,14 @@ const offlineModel: CommandMapModel = {
 }
 
 describe('CommandMap', () => {
-  it('renders Eve, layer toggles, and inspector state', () => {
+  beforeEach(() => {
+    installStorageMock()
+  })
+
+  it('renders Eve, layer toggles, and inspector state', async () => {
     render(<CommandMap model={model} />)
 
-    expect(screen.getByRole('button', { name: /Eve/i })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: /^Eve(?:\s|$)/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Execution/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Declutter/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Focus/i })).toBeInTheDocument()
@@ -79,26 +148,26 @@ describe('CommandMap', () => {
     expect(screen.queryByRole('button', { name: /Model/i })).not.toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: /Declutter/i }))
-    expect(screen.getByRole('button', { name: /Model/i })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: /^Model(?:\s|$)/i })).toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('button', { name: /Alpha/i }))
+    fireEvent.click(await screen.findByRole('button', { name: /^Alpha(?:\s|$)/i }))
     fireEvent.click(screen.getByRole('button', { name: /Focus/i }))
 
     expect(screen.getByRole('heading', { name: /Alpha/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Focus/i })).toHaveAttribute('aria-pressed', 'true')
-    expect(screen.getByText(/session-s1/i)).toBeInTheDocument()
+    expect(screen.getAllByText(/session-s1/i)).not.toHaveLength(0)
   })
 
-  it('clears selection and focus when the selected layer is hidden', () => {
+  it('clears selection and focus when the selected layer is hidden', async () => {
     render(<CommandMap model={model} />)
 
-    fireEvent.click(screen.getByRole('button', { name: /Alpha/i }))
+    fireEvent.click(await screen.findByRole('button', { name: /^Alpha(?:\s|$)/i }))
     fireEvent.click(screen.getByRole('button', { name: /Focus/i }))
     fireEvent.click(screen.getByRole('button', { name: /Execution/i }))
 
     expect(screen.getByText(/select a node to inspect/i)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Focus/i })).toHaveAttribute('aria-pressed', 'false')
-    expect(screen.queryByRole('button', { name: /Alpha/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Alpha(?:\s|$)/i })).not.toBeInTheDocument()
   })
 
   it('does not render a dead search control', () => {
@@ -107,11 +176,36 @@ describe('CommandMap', () => {
     expect(screen.queryByRole('button', { name: /Search/i })).not.toBeInTheDocument()
   })
 
-  it('renders offline Eve with an error tone', () => {
+  it('renders offline Eve with an error tone', async () => {
     render(<CommandMap model={offlineModel} />)
 
-    const eve = screen.getByRole('button', { name: /Eve/i })
+    const eve = await screen.findByRole('button', { name: /^Eve(?:\s|$)/i })
     expect(eve).toHaveTextContent(/offline · gateway unavailable/i)
     expect(eve.className).toContain('border-red-400/40')
+  })
+
+  it('pins dragged nodes into persisted layout storage', async () => {
+    render(<CommandMap model={model} />)
+
+    fireEvent.click(screen.getByRole('button', { name: /^Drag session-s1$/i }))
+
+    await waitFor(() => {
+      expect(loadCommandMapPinnedPositions()).toMatchObject({
+        'session-s1': { x: expect.any(Number), y: expect.any(Number) },
+      })
+    })
+  })
+
+  it('prunes stale pinned positions when the topology no longer contains them', async () => {
+    saveCommandMapPinnedPositions({
+      'session-a': { x: 320, y: -24 },
+      'alert-old': { x: -80, y: 10 },
+    })
+
+    render(<CommandMap model={offlineModel} />)
+
+    await waitFor(() => {
+      expect(loadCommandMapPinnedPositions()).toEqual({})
+    })
   })
 })
