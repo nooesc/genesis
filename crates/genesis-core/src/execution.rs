@@ -33,6 +33,16 @@ struct SandboxComponents {
     base_config: SandboxConfig,
 }
 
+/// Provider clients built for a single agent loop invocation.
+///
+/// Groups the primary LLM client, optional tool-routing client, and
+/// optional fallback clients so they can be constructed in one place.
+struct ProviderClients {
+    primary: genesis_provider::ChatClient,
+    tool_client: Option<genesis_provider::ChatClient>,
+    fallbacks: Vec<(genesis_provider::ChatClient, std::time::Duration)>,
+}
+
 /// Bridges the async `SandboxManager` into the sync `SandboxExecutor` trait.
 struct SandboxExecutorImpl {
     manager: Arc<SandboxManager>,
@@ -763,6 +773,87 @@ impl<'a> SessionExecutionService<'a> {
         SessionStore::new(&self.loaded.config.storage.database_path)
     }
 
+    /// Build all provider clients (primary, tool-routing, fallback) for a
+    /// single agent loop invocation.
+    async fn build_provider_clients(&self) -> Result<ProviderClients, SessionExecutionError> {
+        let (backend, model) = self.effective_provider_selection();
+        let cb_cfg = self.loaded.config.provider.circuit_breaker.as_ref();
+        let primary = genesis_provider::client_from_config_with_circuit_breaker(
+            backend,
+            model,
+            self.loaded.config.provider.base_url.as_deref(),
+            self.loaded.config.provider.api_key_env.as_deref(),
+            cb_cfg.map(|c| c.failure_threshold),
+            cb_cfg.map(|c| c.cooldown_secs),
+        )
+        .await?;
+        debug!(
+            provider_backend = %backend,
+            model = %model,
+            "built primary provider client"
+        );
+
+        // Optional tool-routing client
+        let tool_client = if let Some(tp) = &self.loaded.config.tool_provider {
+            let tp_cb = tp.circuit_breaker.as_ref();
+            let client = genesis_provider::client_from_config_with_circuit_breaker(
+                &tp.backend,
+                &tp.model,
+                tp.base_url.as_deref(),
+                tp.api_key_env.as_deref(),
+                tp_cb.map(|c| c.failure_threshold),
+                tp_cb.map(|c| c.cooldown_secs),
+            )
+            .await?;
+            debug!(
+                tool_provider_backend = %tp.backend,
+                tool_model = %tp.model,
+                "multi-provider routing enabled"
+            );
+            Some(client)
+        } else {
+            None
+        };
+
+        // Optional fallback clients for automatic failover
+        let fallbacks = if self.loaded.config.fallback_providers.is_empty() {
+            Vec::new()
+        } else {
+            use std::time::Duration;
+
+            let default_timeout = Duration::from_secs(30);
+            let mut fallbacks = Vec::new();
+            for fp in &self.loaded.config.fallback_providers {
+                let fb_cb = fp.circuit_breaker.as_ref();
+                let fb_client = genesis_provider::client_from_config_with_circuit_breaker(
+                    &fp.backend,
+                    &fp.model,
+                    fp.base_url.as_deref(),
+                    fp.api_key_env.as_deref(),
+                    fb_cb.map(|c| c.failure_threshold),
+                    fb_cb.map(|c| c.cooldown_secs),
+                )
+                .await?;
+                let timeout = fp
+                    .timeout_secs
+                    .map(Duration::from_secs)
+                    .unwrap_or(default_timeout);
+                fallbacks.push((fb_client, timeout));
+            }
+            debug!(
+                fallback_count = self.loaded.config.fallback_providers.len(),
+                "provider failover enabled"
+            );
+            fallbacks
+        };
+
+        Ok(ProviderClients {
+            primary,
+            tool_client,
+            fallbacks,
+        })
+    }
+
     async fn build_agent_loop(
         &self,
         session_id: String,
@@ -969,22 +1060,7 @@ impl<'a> SessionExecutionService<'a> {
             prompt_builder = prompt_builder.memories(m);
         }
         let system_prompt = prompt_builder.build();
-        let (backend, model) = self.effective_provider_selection();
-        let cb_cfg = self.loaded.config.provider.circuit_breaker.as_ref();
-        let client = genesis_provider::client_from_config_with_circuit_breaker(
-            backend,
-            model,
-            self.loaded.config.provider.base_url.as_deref(),
-            self.loaded.config.provider.api_key_env.as_deref(),
-            cb_cfg.map(|c| c.failure_threshold),
-            cb_cfg.map(|c| c.cooldown_secs),
-        )
-        .await?;
-        debug!(
-            provider_backend = %backend,
-            model = %model,
-            "built agent loop dependencies"
-        );
+        let clients = self.build_provider_clients().await?;
 
         let hook_runner = crate::hooks::HookRunner::default();
         let hooks: Arc<dyn crate::agent_loop::AgentHooks> =
@@ -1012,7 +1088,7 @@ impl<'a> SessionExecutionService<'a> {
 
         let subagent_tool_runtime = Arc::new(tool_runtime.clone());
         let mut agent = AgentLoop::with_history(
-            client,
+            clients.primary,
             tool_runtime,
             AgentLoopConfig {
                 system_prompt: Some(system_prompt),
@@ -1051,54 +1127,11 @@ impl<'a> SessionExecutionService<'a> {
             agent.set_lua_runtime(runtime);
         }
 
-        // Set up tool provider routing if configured
-        if let Some(tp) = &self.loaded.config.tool_provider {
-            let tp_cb = tp.circuit_breaker.as_ref();
-            let tool_client = genesis_provider::client_from_config_with_circuit_breaker(
-                &tp.backend,
-                &tp.model,
-                tp.base_url.as_deref(),
-                tp.api_key_env.as_deref(),
-                tp_cb.map(|c| c.failure_threshold),
-                tp_cb.map(|c| c.cooldown_secs),
-            )
-            .await?;
+        if let Some(tool_client) = clients.tool_client {
             agent.set_tool_client(tool_client);
-            debug!(
-                tool_provider_backend = %tp.backend,
-                tool_model = %tp.model,
-                "multi-provider routing enabled"
-            );
         }
-
-        // Set up fallback providers for automatic failover (sequential, config order).
-        if !self.loaded.config.fallback_providers.is_empty() {
-            use std::time::Duration;
-
-            let default_timeout = Duration::from_secs(30);
-            let mut fallbacks = Vec::new();
-            for fp in &self.loaded.config.fallback_providers {
-                let fb_cb = fp.circuit_breaker.as_ref();
-                let fb_client = genesis_provider::client_from_config_with_circuit_breaker(
-                    &fp.backend,
-                    &fp.model,
-                    fp.base_url.as_deref(),
-                    fp.api_key_env.as_deref(),
-                    fb_cb.map(|c| c.failure_threshold),
-                    fb_cb.map(|c| c.cooldown_secs),
-                )
-                .await?;
-                let timeout = fp
-                    .timeout_secs
-                    .map(Duration::from_secs)
-                    .unwrap_or(default_timeout);
-                fallbacks.push((fb_client, timeout));
-            }
-            agent.set_fallback_clients(fallbacks);
-            debug!(
-                fallback_count = self.loaded.config.fallback_providers.len(),
-                "provider failover enabled"
-            );
+        if !clients.fallbacks.is_empty() {
+            agent.set_fallback_clients(clients.fallbacks);
         }
 
         // Attach subagent spawner so agent can spawn parallel workstreams
