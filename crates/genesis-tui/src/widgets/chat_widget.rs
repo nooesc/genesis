@@ -338,9 +338,9 @@ impl ChatWidget {
 
     /// Return styled lines for in-progress tool calls in the active cell.
     ///
-    /// Shows a single summary line for tool calls being executed, so the
-    /// user sees activity in the chat area during tool execution (not just
-    /// in the status bar).
+    /// Completed tools are collapsed into a compact summary line to avoid
+    /// filling the viewport when many tools run in a single turn. Only
+    /// currently-running tools are shown individually.
     fn active_tool_lines(&self) -> Vec<Line<'static>> {
         let cell = match &self.active_cell {
             Some(c) if !c.tool_calls.is_empty() => c,
@@ -349,29 +349,59 @@ impl ChatWidget {
         let dim = Style::default().fg(self.theme_dim);
         let accent = Style::default().fg(self.theme_accent);
         let ok_color = Style::default().fg(ratatui::style::Color::Rgb(100, 200, 100));
+        let fail_color = Style::default().fg(ratatui::style::Color::Rgb(200, 100, 100));
         let prefix_indent = "     "; // matches "eve> " width
 
-        let mut lines = Vec::new();
+        // Count completed vs running tools.
+        let mut done_ok = 0usize;
+        let mut done_fail = 0usize;
+        let mut total_dur = std::time::Duration::ZERO;
+        let mut running: Vec<&ActiveToolCall> = Vec::new();
+
         for tc in &cell.tool_calls {
-            let (icon, icon_style) = match tc.success {
-                Some(true) => ("\u{2713} ", ok_color), // ✓
-                Some(false) => (
-                    "\u{2717} ",
-                    Style::default().fg(ratatui::style::Color::Rgb(200, 100, 100)),
-                ),
-                None => ("\u{2022} ", accent), // • (running)
+            match tc.success {
+                Some(true) => {
+                    done_ok += 1;
+                    total_dur += tc.duration.unwrap_or_default();
+                }
+                Some(false) => {
+                    done_fail += 1;
+                    total_dur += tc.duration.unwrap_or_default();
+                }
+                None => running.push(tc),
+            }
+        }
+
+        let mut lines = Vec::new();
+
+        // Compact summary for completed tools (1 line max).
+        let done_total = done_ok + done_fail;
+        if done_total > 0 {
+            let dur_str = format!("{:.1}s", total_dur.as_secs_f64());
+            let (status, status_style) = if done_fail > 0 {
+                (format!("{done_fail} failed"), fail_color)
+            } else {
+                ("all ok".to_owned(), ok_color)
             };
-            let dur = tc
-                .duration
-                .map(|d| format!(" {:.1}s", d.as_secs_f64()))
-                .unwrap_or_default();
             lines.push(Line::from(vec![
                 Span::raw(prefix_indent.to_owned()),
-                Span::styled(icon.to_owned(), icon_style),
-                Span::styled(tc.tool_name.clone(), dim),
-                Span::styled(dur, dim),
+                Span::styled("\u{25b8} ", ok_color), // ▸
+                Span::styled(format!("{done_total} tool calls"), dim),
+                Span::styled(format!(" ({dur_str}, "), dim),
+                Span::styled(status, status_style),
+                Span::styled(")", dim),
             ]));
         }
+
+        // Individual lines for running tools.
+        for tc in running {
+            lines.push(Line::from(vec![
+                Span::raw(prefix_indent.to_owned()),
+                Span::styled("\u{2022} ", accent), // •
+                Span::styled(tc.tool_name.clone(), dim),
+            ]));
+        }
+
         lines
     }
 
