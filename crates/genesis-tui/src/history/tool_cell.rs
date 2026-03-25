@@ -362,6 +362,23 @@ impl ToolCell {
     /// Extract the first line of the output, truncated to `max_chars` characters.
     ///
     /// Returns `None` if there is no output or the first line is blank.
+    /// First non-blank line of output, truncated. Used as a brief preview
+    /// in Grouped mode for successful tools.
+    fn output_preview(&self, max_chars: usize) -> Option<String> {
+        let output = self.output.as_deref()?;
+        let first_line = output.lines().find(|l| !l.trim().is_empty())?;
+        let trimmed = first_line.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        if trimmed.chars().count() > max_chars {
+            let s: String = trimmed.chars().take(max_chars).collect();
+            Some(format!("{s}…"))
+        } else {
+            Some(trimmed.to_owned())
+        }
+    }
+
     fn error_context(&self, max_chars: usize) -> Option<String> {
         let output = self.output.as_deref()?;
         let first_line = output.lines().find(|l| !l.trim().is_empty())?;
@@ -431,7 +448,7 @@ impl ToolCell {
 
         lines.push(status_line);
 
-        // On failure, show a brief error reason (first line of output) if available.
+        // On failure, show a brief error reason; on success, show output preview.
         if !self.success {
             if let Some(reason) = self.error_context(60) {
                 let error_line = Line::from(vec![
@@ -444,6 +461,13 @@ impl ToolCell {
                 ]);
                 lines.push(error_line);
             }
+        } else if let Some(preview) = self.output_preview(55) {
+            let preview_line = Line::from(vec![
+                Span::styled("  │ ↳ ", Style::default().fg(UI_DIM)),
+                Span::styled(preview, Style::default().fg(Color::Rgb(120, 120, 120))),
+                Span::styled(" │", Style::default().fg(UI_DIM)),
+            ]);
+            lines.push(preview_line);
         }
 
         lines.push(bottom);
@@ -861,13 +885,26 @@ mod tests {
     }
 
     #[test]
-    fn grouped_success_with_output_no_error_context_line() {
+    fn grouped_success_with_output_shows_preview() {
         let cell = make_cell(true)
             .with_display_mode(ToolDisplayMode::Grouped)
             .with_output("some output");
         let lines = cell.to_scrollback_lines(80);
-        // success: error context is not shown even if there is output
-        assert_eq!(lines.len(), 4, "grouped success should remain 4 lines");
+        // Grouped success with output: top + content + status + preview + bottom = 5
+        assert_eq!(
+            lines.len(),
+            5,
+            "grouped success with output should be 5 lines (includes preview)"
+        );
+        let all_text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            all_text.contains("some output"),
+            "should show output preview: {all_text:?}"
+        );
     }
 
     #[test]
@@ -1011,11 +1048,11 @@ diff --git a/src/main.rs b/src/main.rs
             .with_display_mode(ToolDisplayMode::Grouped)
             .with_output("wrote 42 bytes to foo.txt");
         let lines = cell.to_scrollback_lines(80);
-        // Plain output should not expand — grouped mode uses per-category content only
+        // Grouped: top + content + status + output_preview + bottom = 5 lines
         assert_eq!(
             lines.len(),
-            4,
-            "grouped with plain output should be 4 lines"
+            5,
+            "grouped with plain output should be 5 lines (includes preview)"
         );
     }
 
