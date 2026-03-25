@@ -282,12 +282,14 @@ impl InputWidget {
                 InputAction::None
             }
 
-            (KeyCode::Left, _) => {
+            // Ctrl+B — backward char (Emacs)
+            (KeyCode::Char('b'), KeyModifiers::CONTROL) | (KeyCode::Left, _) => {
                 self.move_cursor_left();
                 InputAction::None
             }
 
-            (KeyCode::Right, _) => {
+            // Ctrl+F — forward char (Emacs)
+            (KeyCode::Char('f'), KeyModifiers::CONTROL) | (KeyCode::Right, _) => {
                 self.move_cursor_right();
                 InputAction::None
             }
@@ -322,7 +324,8 @@ impl InputWidget {
             }
 
             // ── Up/Down: line navigation when multi-line, history when single-line
-            (KeyCode::Up, _) => {
+            // Ctrl+P — previous (Emacs)
+            (KeyCode::Char('p'), KeyModifiers::CONTROL) | (KeyCode::Up, _) => {
                 if self.is_multiline() {
                     self.move_cursor_up();
                 } else {
@@ -331,7 +334,8 @@ impl InputWidget {
                 InputAction::None
             }
 
-            (KeyCode::Down, _) => {
+            // Ctrl+N — next (Emacs)
+            (KeyCode::Char('n'), KeyModifiers::CONTROL) | (KeyCode::Down, _) => {
                 if self.is_multiline() {
                     self.move_cursor_down();
                 } else {

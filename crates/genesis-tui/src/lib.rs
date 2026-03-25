@@ -844,8 +844,14 @@ fn render_frame(
                 }
 
                 if input_area.height >= 2 && input_area.width >= 2 {
-                    // Input panel border.
-                    let border_style = Style::default().fg(app.active_theme.border());
+                    // Input panel border — accent when idle (accepting input),
+                    // dim when a turn is running.
+                    let border_color = if app.turn_running {
+                        app.active_theme.text_dim()
+                    } else {
+                        app.active_theme.border()
+                    };
+                    let border_style = Style::default().fg(border_color);
                     crate::render::draw_box(input_area, buf, border_style, None);
 
                     let inner = Rect {
