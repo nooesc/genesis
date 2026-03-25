@@ -101,7 +101,6 @@ impl AgentLoop {
         // Reset stuck-loop state at the start of each new user turn so
         // stale failure counts from a previous turn don't cause false positives.
         self.tool_failure_counts.clear();
-        self.nudge_sent = false;
         self.tools.clear_recalled_memory_ids();
 
         let hook_session = self.session_id_str().to_owned();

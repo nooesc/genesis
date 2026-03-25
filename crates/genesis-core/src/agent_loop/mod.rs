@@ -79,9 +79,6 @@ pub struct AgentLoop {
     /// Tools discovered via `find_tools` during this session. These are added
     /// to the core set for subsequent LLM requests.
     pub(crate) discovered_tools: HashSet<String>,
-    /// Whether a stuck-loop nudge has been sent during this user turn.
-    /// Cleared at the start of each new turn so the agent gets a fresh chance.
-    pub(crate) nudge_sent: bool,
 }
 
 impl AgentLoop {
@@ -152,7 +149,6 @@ impl AgentLoop {
             cache_misses: 0,
             compiled_guardrails,
             discovered_tools: HashSet::new(),
-            nudge_sent: false,
         }
     }
 
@@ -547,7 +543,6 @@ impl AgentLoop {
         // Reset stuck-loop state at the start of each new user turn so
         // stale failure counts from a previous turn don't cause false positives.
         self.tool_failure_counts.clear();
-        self.nudge_sent = false;
         self.tools.clear_recalled_memory_ids();
 
         // Record turn-level span attributes via tracing events rather than
@@ -1126,7 +1121,6 @@ impl AgentLoop {
             self.tool_failure_counts.remove(tool);
         }
 
-        self.nudge_sent = true;
         let tools_list = stuck_tools.join(", ");
         let nudge = format!(
             "[Stuck loop detected] The tool(s) {tools_list} have failed multiple times in a row. \
@@ -1697,10 +1691,6 @@ tools = [{tools_list}]
             initial_len,
             "no nudge below threshold"
         );
-        assert!(
-            !agent.nudge_sent,
-            "nudge_sent should be false below threshold"
-        );
 
         // Simulate 5 failures — should trigger at default threshold
         agent.tool_failure_counts.insert("web_search".to_owned(), 5);
@@ -1713,7 +1703,6 @@ tools = [{tools_list}]
         let last = agent.messages().last().unwrap();
         assert!(last.content_text().unwrap().contains("Stuck loop"));
         assert!(last.content_text().unwrap().contains("web_search"));
-        assert!(agent.nudge_sent, "nudge_sent should be true after nudge");
 
         // Counter should be cleared, so next check shouldn't nudge again
         agent.maybe_inject_stuck_nudge();
@@ -1743,7 +1732,6 @@ tools = [{tools_list}]
             initial_len + 1,
             "nudge injected at custom threshold"
         );
-        assert!(agent.nudge_sent);
     }
 
     #[test]
@@ -1766,22 +1754,16 @@ tools = [{tools_list}]
         // Simulate a stuck-loop nudge was sent in a previous turn
         agent.tool_failure_counts.insert("web_search".to_owned(), 5);
         agent.maybe_inject_stuck_nudge();
-        assert!(agent.nudge_sent);
         // Add some leftover failure counts that weren't cleared by the nudge
         agent.tool_failure_counts.insert("read_file".to_owned(), 2);
         assert!(!agent.tool_failure_counts.is_empty());
 
         // Simulate what run_turn_with_images does at the start of a new turn
         agent.tool_failure_counts.clear();
-        agent.nudge_sent = false;
 
         assert!(
             agent.tool_failure_counts.is_empty(),
             "failure counts should be cleared on new turn"
-        );
-        assert!(
-            !agent.nudge_sent,
-            "nudge_sent should be cleared on new turn"
         );
     }
 
