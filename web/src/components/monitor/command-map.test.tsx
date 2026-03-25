@@ -173,6 +173,15 @@ describe('CommandMap', () => {
     expect(screen.getAllByText(/session-s1/i)).not.toHaveLength(0)
   })
 
+  it('keeps recipes visible during declutter alongside triggers', async () => {
+    render(<CommandMap model={model} />)
+
+    fireEvent.click(screen.getByRole('button', { name: /Declutter/i }))
+
+    expect(await screen.findByRole('button', { name: /^nightly(?:\s|$)/i })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: /^deploy-service(?:\s|$)/i })).toBeInTheDocument()
+  })
+
   it('clears selection and focus when the selected layer is hidden', async () => {
     render(<CommandMap model={model} />)
 

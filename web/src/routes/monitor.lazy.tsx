@@ -15,6 +15,25 @@ export const Route = createLazyFileRoute('/monitor')({
   component: MonitorPage,
 })
 
+export interface MonitorLoadingState {
+  healthLoading: boolean
+  insightsLoading: boolean
+  sessionsLoading: boolean
+  schedulesLoading: boolean
+  auditLoading: boolean
+  skillsLoading: boolean
+}
+
+export function shouldShowMonitorSkeleton({
+  healthLoading,
+  insightsLoading,
+  sessionsLoading,
+  schedulesLoading,
+  auditLoading,
+}: MonitorLoadingState): boolean {
+  return healthLoading || insightsLoading || sessionsLoading || schedulesLoading || auditLoading
+}
+
 function MonitorPage() {
   const search = Route.useSearch()
   const { data: health, isLoading: healthLoading } = useHealth()
@@ -37,7 +56,14 @@ function MonitorPage() {
     return buildCommandMapModel(input)
   }, [audit, health, insights, schedules, sessions, skills])
 
-  const isLoading = healthLoading || insightsLoading || sessionsLoading || schedulesLoading || skillsLoading || auditLoading
+  const isLoading = shouldShowMonitorSkeleton({
+    healthLoading,
+    insightsLoading,
+    sessionsLoading,
+    schedulesLoading,
+    auditLoading,
+    skillsLoading,
+  })
 
   if (isLoading) {
     return (

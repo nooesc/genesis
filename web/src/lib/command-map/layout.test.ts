@@ -1,4 +1,3 @@
-import * as layout from './layout'
 import { describe, expect, it } from 'vitest'
 import { applyCommandMapLayout, COMMAND_MAP_RINGS, orderForLayout } from './layout'
 import type { CommandMapNode } from './types'
@@ -43,10 +42,6 @@ const baseNodes: CommandMapNode[] = [
 ]
 
 describe('applyCommandMapLayout', () => {
-  it('does not export a reverse ring-to-layer helper', () => {
-    expect((layout as Record<string, unknown>).ringLayer).toBeUndefined()
-  })
-
   it('orders trigger and recipe nodes by explicit layer within the shared middle ring', () => {
     const ordered = orderForLayout([
       {

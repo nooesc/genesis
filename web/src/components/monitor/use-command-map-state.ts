@@ -41,7 +41,7 @@ export function useCommandMapState(nodes: CommandMapNode[], options: UseCommandM
     () => layerVisibleNodes.filter(node => {
       if (!isDecluttered) return true
       if (node.id === selectedNodeId) return true
-      return node.kind === 'eve' || node.kind === 'thread' || node.kind === 'trigger'
+      return node.kind === 'eve' || node.kind === 'thread' || node.kind === 'trigger' || node.kind === 'recipe'
     }),
     [isDecluttered, layerVisibleNodes, selectedNodeId],
   )
