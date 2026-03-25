@@ -17,7 +17,7 @@ interface EventLogDrawerProps {
 }
 
 export function EventLogDrawer({ open, onOpenChange, title, sessionId = null, eventType = null }: EventLogDrawerProps) {
-  const { data: auditEntries = [] } = useAuditLog({ limit: 50 }, { enabled: open, refetchInterval: 30_000 })
+  const { data: auditEntries = [], isLoading } = useAuditLog({ limit: 50 }, { enabled: open, refetchInterval: 30_000 })
 
   const entries = auditEntries.filter(entry => {
     if (sessionId && entry.session_id !== sessionId) return false
@@ -49,7 +49,11 @@ export function EventLogDrawer({ open, onOpenChange, title, sessionId = null, ev
         </div>
 
         <div className="flex flex-1 flex-col gap-2 overflow-auto px-4 pb-4">
-          {entries.length === 0 ? (
+          {isLoading ? (
+            <div className="rounded-lg border border-border/20 bg-muted/20 p-3 font-mono text-xs text-muted-foreground/70">
+              Loading event log...
+            </div>
+          ) : entries.length === 0 ? (
             <div className="rounded-lg border border-border/20 bg-muted/20 p-3 font-mono text-xs text-muted-foreground/70">
               No matching events found.
             </div>

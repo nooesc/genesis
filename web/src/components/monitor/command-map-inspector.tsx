@@ -35,7 +35,18 @@ function buildFacts(selectedNode: CommandMapNode): Array<{ label: string; value:
       ]
     case 'system':
       return [
-        { label: 'Model', value: String(selectedNode.data?.model ?? 'unknown') },
+        ...(typeof selectedNode.data?.model === 'string'
+          ? [{ label: 'Model', value: selectedNode.data.model }]
+          : []),
+        ...(typeof selectedNode.data?.mcp_servers === 'number'
+          ? [{ label: 'MCP servers', value: String(selectedNode.data.mcp_servers) }]
+          : []),
+        ...(typeof selectedNode.data?.platform === 'string'
+          ? [{ label: 'Platform', value: selectedNode.data.platform }]
+          : []),
+        ...(typeof selectedNode.data?.count === 'number'
+          ? [{ label: 'Count', value: String(selectedNode.data.count) }]
+          : []),
         { label: 'Ring', value: String(selectedNode.ring) },
       ]
     case 'eve':
