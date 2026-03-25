@@ -396,6 +396,10 @@ impl App {
                         let _ = self
                             .app_tx
                             .send(AppEvent::CopyToClipboard(text.to_string()));
+                        self.status_bar
+                            .show_transient_warning("\u{2713} Copied to clipboard");
+                    } else {
+                        self.status_bar.show_transient_warning("Nothing to copy");
                     }
                     self.frame_requester.schedule_frame();
                 }

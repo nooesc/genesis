@@ -101,6 +101,17 @@ fn tool_category(name: &str) -> ToolCategory {
 /// Extract a file path from an args summary string.
 ///
 /// The summary typically looks like `path: "src/main.rs"` or just `src/main.rs`.
+/// Truncate a tool name to `max` characters with ellipsis if too long.
+/// MCP tool names can be very long (e.g. `mcp__plugin_playwright__browser_navigate`).
+fn truncate_tool_name(name: &str, max: usize) -> String {
+    if name.chars().count() <= max {
+        name.to_owned()
+    } else {
+        let truncated: String = name.chars().take(max - 1).collect();
+        format!("{truncated}\u{2026}") // …
+    }
+}
+
 fn extract_path(args_summary: &str) -> String {
     // Try to extract a quoted path first.
     if let Some(start) = args_summary.find('"') {
@@ -419,10 +430,12 @@ impl ToolCell {
         let (status_str, status_color) = self.status_str();
 
         // Top border: `  ┌─ tool_name ──...──┐`
+        // Truncate long tool names (MCP tools can be very long).
+        let display_name = truncate_tool_name(&self.tool_name, 40);
         let name_color = tool_color(&self.tool_name);
         let top = Line::from(vec![
             Span::styled("  ┌─ ", Style::default().fg(UI_DIM)),
-            Span::styled(self.tool_name.clone(), Style::default().fg(name_color)),
+            Span::styled(display_name.clone(), Style::default().fg(name_color)),
             Span::styled(" ─┐", Style::default().fg(UI_DIM)),
         ]);
 
@@ -439,7 +452,7 @@ impl ToolCell {
         ]);
 
         // Bottom border: `  └─ … ─┘` matching the top border width.
-        let fill_width = self.tool_name.width() + 2; // "─ " + name + " ─"
+        let fill_width = display_name.width() + 2; // "─ " + name + " ─"
         let bottom_fill = "─".repeat(fill_width);
         let bottom = Line::from(vec![Span::styled(
             format!("  └{}┘", bottom_fill),

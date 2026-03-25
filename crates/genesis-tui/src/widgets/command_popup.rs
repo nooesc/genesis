@@ -339,7 +339,7 @@ impl CommandPopup {
             let row_y = popup_y + 1 + row_idx as u16;
 
             // Build the row content as a Line and render it.
-            let line = build_item_line(cmd, is_selected, inner_width);
+            let line = build_item_line(cmd, is_selected, inner_width, &self.query);
             let mut x = popup_x + 1;
             for span in &line.spans {
                 let style = span.style;
@@ -386,7 +386,13 @@ impl Default for CommandPopup {
 ///
 /// Layout: `  /name      description…`
 /// Selected row has a coloured background and the `>` indicator.
-fn build_item_line(cmd: &CommandDef, is_selected: bool, inner_width: usize) -> Line<'static> {
+/// Matching query characters in the name are highlighted with bold.
+fn build_item_line(
+    cmd: &CommandDef,
+    is_selected: bool,
+    inner_width: usize,
+    query: &str,
+) -> Line<'static> {
     // Indicator: "> " for selected, "  " otherwise.
     let indicator = if is_selected { "> " } else { "  " };
 
@@ -398,19 +404,25 @@ fn build_item_line(cmd: &CommandDef, is_selected: bool, inner_width: usize) -> L
         Style::default().fg(INDICATOR_FG)
     };
 
-    let name = cmd.name;
-    // Fixed name column width. render() clamps popup_width >= 20, so
-    // inner_width is always >= 18 — no need for narrow-terminal shrinking.
     let name_col_width = 14usize;
-    let name_padded = format!("{:<width$}", name, width = name_col_width);
 
-    let name_style = if is_selected {
+    let name_base = if is_selected {
         Style::default()
             .fg(SELECTED_TEXT_FG)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(NAME_FG)
     };
+    let name_match = if is_selected {
+        name_base
+    } else {
+        Style::default()
+            .fg(SELECTED_TEXT_FG)
+            .add_modifier(Modifier::BOLD)
+    };
+
+    // Build name spans with match highlighting.
+    let name_spans = highlight_matches(cmd.name, query, name_col_width, name_base, name_match);
 
     let desc_style = if is_selected {
         Style::default().fg(SELECTED_TEXT_FG)
@@ -423,11 +435,86 @@ fn build_item_line(cmd: &CommandDef, is_selected: bool, inner_width: usize) -> L
     let desc_width = inner_width.saturating_sub(used);
     let desc = truncate_str(cmd.description, desc_width);
 
-    Line::from(vec![
-        Span::styled(indicator.to_owned(), indicator_style),
-        Span::styled(name_padded, name_style),
-        Span::styled(desc, desc_style),
-    ])
+    let mut spans = vec![Span::styled(indicator.to_owned(), indicator_style)];
+    spans.extend(name_spans);
+    spans.push(Span::styled(desc, desc_style));
+    Line::from(spans)
+}
+
+/// Highlight characters in `name` that match the `query` subsequence.
+/// Returns spans padded to `col_width`.
+fn highlight_matches(
+    name: &str,
+    query: &str,
+    col_width: usize,
+    base_style: Style,
+    match_style: Style,
+) -> Vec<Span<'static>> {
+    if query.is_empty() {
+        return vec![Span::styled(
+            format!("{:<width$}", name, width = col_width),
+            base_style,
+        )];
+    }
+
+    let name_lower = name.to_lowercase();
+    let query_lower = query.to_lowercase();
+
+    // Find match positions (greedy subsequence).
+    let mut match_positions = Vec::new();
+    let mut qi = 0;
+    let query_chars: Vec<char> = query_lower.chars().collect();
+    for (i, ch) in name_lower.chars().enumerate() {
+        if qi < query_chars.len() && ch == query_chars[qi] {
+            match_positions.push(i);
+            qi += 1;
+        }
+    }
+
+    let match_set: std::collections::HashSet<usize> = match_positions.into_iter().collect();
+    let mut spans = Vec::new();
+    let mut current = String::new();
+    let mut current_is_match = false;
+
+    for (i, ch) in name.chars().enumerate() {
+        let is_match = match_set.contains(&i);
+        if is_match != current_is_match && !current.is_empty() {
+            let style = if current_is_match {
+                match_style
+            } else {
+                base_style
+            };
+            spans.push(Span::styled(std::mem::take(&mut current), style));
+        }
+        current.push(ch);
+        current_is_match = is_match;
+    }
+
+    // Pad to column width.
+    let name_len = name.chars().count();
+    if name_len < col_width {
+        let padding = col_width - name_len;
+        if !current_is_match {
+            current.extend(std::iter::repeat_n(' ', padding));
+        } else {
+            // Flush current match span, then add padding as base.
+            if !current.is_empty() {
+                spans.push(Span::styled(std::mem::take(&mut current), match_style));
+            }
+            current = " ".repeat(padding);
+            current_is_match = false;
+        }
+    }
+    if !current.is_empty() {
+        let style = if current_is_match {
+            match_style
+        } else {
+            base_style
+        };
+        spans.push(Span::styled(current, style));
+    }
+
+    spans
 }
 
 /// Truncate a string to at most `max_chars` Unicode scalar values.
