@@ -96,6 +96,55 @@ fn plugins_enabled(loaded: &LoadedConfig, overrides: PluginRuntimeOverrides) -> 
         .unwrap_or(loaded.config.plugins.enabled && !env_flag("GENESIS_NO_PLUGINS"))
 }
 
+/// Build the standard `config_values` map for a `LuaRuntimeConfig`.
+///
+/// Shared between `SessionExecutionService::lua_runtime_config` and
+/// `ExecutionSubagentSpawner::build_lua_runtime` to eliminate duplication.
+fn build_lua_config_values(
+    loaded: &LoadedConfig,
+    profile: &str,
+    backend: &str,
+    model: &str,
+    platform: &str,
+    plugins_enabled: bool,
+    personality: Option<&str>,
+) -> BTreeMap<String, String> {
+    let mut values = BTreeMap::new();
+    values.insert("profile".to_owned(), profile.to_owned());
+    values.insert("provider_backend".to_owned(), backend.to_owned());
+    values.insert("provider_model".to_owned(), model.to_owned());
+    values.insert("delivery_platform".to_owned(), platform.to_owned());
+    values.insert("plugins_enabled".to_owned(), plugins_enabled.to_string());
+    values.insert(
+        "plugin_hook_timeout_ms".to_owned(),
+        loaded.config.plugins.hook_timeout_ms.to_string(),
+    );
+    values.insert(
+        "plugin_tool_timeout_ms".to_owned(),
+        loaded.config.plugins.tool_timeout_ms.to_string(),
+    );
+    values.insert(
+        "plugin_auto_disable_after".to_owned(),
+        loaded.config.plugins.auto_disable_after.to_string(),
+    );
+    values.insert(
+        "data_dir".to_owned(),
+        loaded.paths.data_dir.to_string_lossy().into_owned(),
+    );
+    values.insert(
+        "database_path".to_owned(),
+        loaded.paths.database_path.to_string_lossy().into_owned(),
+    );
+    values.insert(
+        "plugin_dir".to_owned(),
+        loaded.paths.plugin_dir.to_string_lossy().into_owned(),
+    );
+    if let Some(personality) = personality {
+        values.insert("personality".to_owned(), personality.to_owned());
+    }
+    values
+}
+
 /// Bridges the async `EmbeddingProvider` into the sync `EmbeddingService` trait.
 struct EmbeddingServiceBridge {
     provider: Arc<crate::embedding::EmbeddingProvider>,
@@ -449,55 +498,15 @@ impl<'a> SessionExecutionService<'a> {
     ) -> LuaRuntimeConfig {
         let cache_key = self.lua_runtime_cache_key(session_id, platform);
         let personality = cache_key.personality.clone();
-        let mut config_values = BTreeMap::new();
-        config_values.insert("profile".to_owned(), self.loaded.config.profile.clone());
-        config_values.insert(
-            "provider_backend".to_owned(),
-            cache_key.provider_backend.clone(),
+        let config_values = build_lua_config_values(
+            self.loaded,
+            &self.loaded.config.profile,
+            &cache_key.provider_backend,
+            &cache_key.provider_model,
+            &cache_key.delivery_platform,
+            self.plugins_enabled(),
+            personality.as_deref(),
         );
-        config_values.insert(
-            "provider_model".to_owned(),
-            cache_key.provider_model.clone(),
-        );
-        config_values.insert(
-            "delivery_platform".to_owned(),
-            cache_key.delivery_platform.clone(),
-        );
-        config_values.insert(
-            "plugins_enabled".to_owned(),
-            self.plugins_enabled().to_string(),
-        );
-        config_values.insert(
-            "plugin_hook_timeout_ms".to_owned(),
-            self.loaded.config.plugins.hook_timeout_ms.to_string(),
-        );
-        config_values.insert(
-            "plugin_tool_timeout_ms".to_owned(),
-            self.loaded.config.plugins.tool_timeout_ms.to_string(),
-        );
-        config_values.insert(
-            "plugin_auto_disable_after".to_owned(),
-            self.loaded.config.plugins.auto_disable_after.to_string(),
-        );
-        config_values.insert(
-            "data_dir".to_owned(),
-            self.loaded.paths.data_dir.to_string_lossy().into_owned(),
-        );
-        config_values.insert(
-            "database_path".to_owned(),
-            self.loaded
-                .paths
-                .database_path
-                .to_string_lossy()
-                .into_owned(),
-        );
-        config_values.insert(
-            "plugin_dir".to_owned(),
-            self.loaded.paths.plugin_dir.to_string_lossy().into_owned(),
-        );
-        if let Some(ref personality) = personality {
-            config_values.insert("personality".to_owned(), personality.clone());
-        }
 
         LuaRuntimeConfig {
             plugin_dir: self.loaded.paths.plugin_dir.clone(),
@@ -1502,7 +1511,8 @@ struct ExecutionSubagentSpawner {
 
 impl ExecutionSubagentSpawner {
     fn build_lua_runtime(&self, child_session_id: &str) -> Option<Arc<LuaRuntime>> {
-        if !plugins_enabled(self.loaded.as_ref(), self.plugin_runtime_overrides) {
+        let is_enabled = plugins_enabled(self.loaded.as_ref(), self.plugin_runtime_overrides);
+        if !is_enabled {
             return None;
         }
 
@@ -1514,42 +1524,14 @@ impl ExecutionSubagentSpawner {
             ),
         };
 
-        let mut config_values = BTreeMap::new();
-        config_values.insert("profile".to_owned(), self.loaded.config.profile.clone());
-        config_values.insert("provider_backend".to_owned(), backend.to_owned());
-        config_values.insert("provider_model".to_owned(), model.to_owned());
-        config_values.insert("delivery_platform".to_owned(), "cli".to_owned());
-        config_values.insert(
-            "plugins_enabled".to_owned(),
-            plugins_enabled(self.loaded.as_ref(), self.plugin_runtime_overrides).to_string(),
-        );
-        config_values.insert(
-            "plugin_hook_timeout_ms".to_owned(),
-            self.loaded.config.plugins.hook_timeout_ms.to_string(),
-        );
-        config_values.insert(
-            "plugin_tool_timeout_ms".to_owned(),
-            self.loaded.config.plugins.tool_timeout_ms.to_string(),
-        );
-        config_values.insert(
-            "plugin_auto_disable_after".to_owned(),
-            self.loaded.config.plugins.auto_disable_after.to_string(),
-        );
-        config_values.insert(
-            "data_dir".to_owned(),
-            self.loaded.paths.data_dir.to_string_lossy().into_owned(),
-        );
-        config_values.insert(
-            "database_path".to_owned(),
-            self.loaded
-                .paths
-                .database_path
-                .to_string_lossy()
-                .into_owned(),
-        );
-        config_values.insert(
-            "plugin_dir".to_owned(),
-            self.loaded.paths.plugin_dir.to_string_lossy().into_owned(),
+        let config_values = build_lua_config_values(
+            &self.loaded,
+            &self.loaded.config.profile,
+            backend,
+            model,
+            "cli",
+            is_enabled,
+            None,
         );
 
         let config = LuaRuntimeConfig {
