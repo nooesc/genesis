@@ -773,6 +773,135 @@ impl<'a> SessionExecutionService<'a> {
         SessionStore::new(&self.loaded.config.storage.database_path)
     }
 
+    /// Build a fully-wired `ToolRuntime` for a single agent loop invocation.
+    ///
+    /// Attaches MCP, approval handler, terminal/sandbox backend, working
+    /// directory, Lua runtime, embedding provider, keyword enricher,
+    /// auto-consolidation threshold, cache watcher, and tool filter.
+    async fn wire_tool_runtime(
+        &self,
+        execution_context: &crate::ExecutionContext,
+        lua_runtime: &Option<Arc<LuaRuntime>>,
+    ) -> Result<ToolRuntime, SessionExecutionError> {
+        let mut tool_runtime = build_default_tool_runtime(execution_context);
+
+        // Attach MCP manager if we connected any servers at service creation
+        if let Some(mcp) = &self.mcp {
+            tool_runtime.set_mcp(Arc::clone(mcp));
+        }
+
+        // Attach interactive approval handler if configured
+        if let Some(handler) = &self.approval_handler {
+            tool_runtime.set_approval_handler(Arc::clone(handler));
+        }
+
+        // Set terminal backend if configured
+        if let Some(terminal) = &self.loaded.config.runtime.terminal {
+            tool_runtime.set_terminal_backend(terminal_config_to_backend(terminal));
+
+            // Wire up lifecycle-managed sandbox execution (persists across turns)
+            let components = self
+                .sandbox
+                .get_or_init(|| create_sandbox_components(self.loaded));
+            if let Some(c) = components {
+                let mut config = c.base_config.clone();
+                config.task_id = execution_context.plan.session_id.clone();
+                let executor: Arc<dyn genesis_tools::SandboxExecutor> =
+                    Arc::new(SandboxExecutorImpl {
+                        manager: c.manager.clone(),
+                        backend: c.backend.clone(),
+                        config,
+                    });
+                tool_runtime.set_sandbox_manager(executor);
+            }
+        }
+
+        // Set default working directory (worktree isolation)
+        if let Some(ref dir) = self.default_working_dir {
+            tool_runtime.set_default_working_dir(dir.clone());
+        }
+
+        // Attach Lua plugin runtime to tool runtime
+        if let Some(runtime) = lua_runtime {
+            tool_runtime.set_lua_runtime(Arc::clone(runtime));
+        }
+
+        // Wire embedding provider for auto-embed in memory tools
+        if let Some(ref config) = self.loaded.config.embedding {
+            match crate::embedding::EmbeddingProvider::from_config(config) {
+                Ok(provider) => {
+                    let model = provider.model().to_owned();
+                    let bridge: Arc<dyn genesis_tools::EmbeddingService> =
+                        Arc::new(EmbeddingServiceBridge {
+                            provider: Arc::new(provider),
+                            model,
+                        });
+                    tool_runtime.set_embedding_service(bridge);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to initialise embedding provider; memory dedup disabled");
+                }
+            }
+        }
+
+        // Wire LLM keyword enricher for richer memory keyword extraction
+        if self.loaded.config.memory.enrich_keywords {
+            match genesis_provider::client_from_config(
+                &self.loaded.config.provider.backend,
+                &self.loaded.config.provider.model,
+                self.loaded.config.provider.base_url.as_deref(),
+                self.loaded.config.provider.api_key_env.as_deref(),
+            )
+            .await
+            {
+                Ok(client) => {
+                    let enricher: Arc<dyn genesis_tools::KeywordEnricher> =
+                        Arc::new(KeywordEnricherBridge { client });
+                    tool_runtime.set_keyword_enricher(enricher);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to initialise keyword enricher; using simple extraction");
+                }
+            }
+        }
+
+        // Wire auto-consolidation threshold from memory config
+        tool_runtime.set_auto_consolidation_threshold(
+            self.loaded.config.memory.auto_consolidation_threshold,
+        );
+
+        // Start filesystem watcher for tool result cache.
+        // Uses the working directory (or worktree dir) as the watch root.
+        {
+            let watch_dir = self
+                .default_working_dir
+                .as_deref()
+                .map(std::path::Path::new)
+                .unwrap_or(std::path::Path::new("."));
+            tool_runtime.start_cache_watcher(watch_dir);
+        }
+
+        // Apply tool filter (allowlist/denylist)
+        if let Some(ref filter) = self.loaded.config.runtime.tool_filter {
+            let mut allowed: std::collections::HashSet<String> = if filter.allow.is_empty() {
+                tool_runtime
+                    .definitions_async()
+                    .await
+                    .into_iter()
+                    .map(|d| d.name)
+                    .collect()
+            } else {
+                filter.allow.iter().cloned().collect()
+            };
+            for denied in &filter.deny {
+                allowed.remove(denied);
+            }
+            tool_runtime.retain(&allowed);
+        }
+
+        Ok(tool_runtime)
+    }
+
     /// Build all provider clients (primary, tool-routing, fallback) for a
     /// single agent loop invocation.
     async fn build_provider_clients(&self) -> Result<ProviderClients, SessionExecutionError> {
@@ -863,43 +992,6 @@ impl<'a> SessionExecutionService<'a> {
     ) -> Result<AgentLoop, SessionExecutionError> {
         let execution_context =
             build_execution_context_from_loaded(self.loaded, session_id, platform);
-        let mut tool_runtime = build_default_tool_runtime(&execution_context);
-
-        // Attach MCP manager if we connected any servers at service creation
-        if let Some(mcp) = &self.mcp {
-            tool_runtime.set_mcp(Arc::clone(mcp));
-        }
-
-        // Attach interactive approval handler if configured
-        if let Some(handler) = &self.approval_handler {
-            tool_runtime.set_approval_handler(Arc::clone(handler));
-        }
-
-        // Set terminal backend if configured
-        if let Some(terminal) = &self.loaded.config.runtime.terminal {
-            tool_runtime.set_terminal_backend(terminal_config_to_backend(terminal));
-
-            // Wire up lifecycle-managed sandbox execution (persists across turns)
-            let components = self
-                .sandbox
-                .get_or_init(|| create_sandbox_components(self.loaded));
-            if let Some(c) = components {
-                let mut config = c.base_config.clone();
-                config.task_id = execution_context.plan.session_id.clone();
-                let executor: Arc<dyn genesis_tools::SandboxExecutor> =
-                    Arc::new(SandboxExecutorImpl {
-                        manager: c.manager.clone(),
-                        backend: c.backend.clone(),
-                        config,
-                    });
-                tool_runtime.set_sandbox_manager(executor);
-            }
-        }
-
-        // Set default working directory (worktree isolation)
-        if let Some(ref dir) = self.default_working_dir {
-            tool_runtime.set_default_working_dir(dir.clone());
-        }
 
         // Warm the Lua plugin runtime once per session so plugin state survives
         // across turns and later middleware can reuse the cached runtime.
@@ -907,82 +999,10 @@ impl<'a> SessionExecutionService<'a> {
             &execution_context.plan.session_id,
             execution_context.plan.platform.clone(),
         );
-        if let Some(runtime) = &lua_runtime {
-            tool_runtime.set_lua_runtime(Arc::clone(runtime));
-        }
 
-        // Wire embedding provider for auto-embed in memory tools
-        if let Some(ref config) = self.loaded.config.embedding {
-            match crate::embedding::EmbeddingProvider::from_config(config) {
-                Ok(provider) => {
-                    let model = provider.model().to_owned();
-                    let bridge: Arc<dyn genesis_tools::EmbeddingService> =
-                        Arc::new(EmbeddingServiceBridge {
-                            provider: Arc::new(provider),
-                            model,
-                        });
-                    tool_runtime.set_embedding_service(bridge);
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to initialise embedding provider; memory dedup disabled");
-                }
-            }
-        }
-
-        // Wire LLM keyword enricher for richer memory keyword extraction
-        if self.loaded.config.memory.enrich_keywords {
-            match genesis_provider::client_from_config(
-                &self.loaded.config.provider.backend,
-                &self.loaded.config.provider.model,
-                self.loaded.config.provider.base_url.as_deref(),
-                self.loaded.config.provider.api_key_env.as_deref(),
-            )
-            .await
-            {
-                Ok(client) => {
-                    let enricher: Arc<dyn genesis_tools::KeywordEnricher> =
-                        Arc::new(KeywordEnricherBridge { client });
-                    tool_runtime.set_keyword_enricher(enricher);
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to initialise keyword enricher; using simple extraction");
-                }
-            }
-        }
-
-        // Wire auto-consolidation threshold from memory config
-        tool_runtime.set_auto_consolidation_threshold(
-            self.loaded.config.memory.auto_consolidation_threshold,
-        );
-
-        // Start filesystem watcher for tool result cache.
-        // Uses the working directory (or worktree dir) as the watch root.
-        {
-            let watch_dir = self
-                .default_working_dir
-                .as_deref()
-                .map(std::path::Path::new)
-                .unwrap_or(std::path::Path::new("."));
-            tool_runtime.start_cache_watcher(watch_dir);
-        }
-
-        // Apply tool filter (allowlist/denylist)
-        if let Some(ref filter) = self.loaded.config.runtime.tool_filter {
-            let mut allowed: std::collections::HashSet<String> = if filter.allow.is_empty() {
-                tool_runtime
-                    .definitions_async()
-                    .await
-                    .into_iter()
-                    .map(|d| d.name)
-                    .collect()
-            } else {
-                filter.allow.iter().cloned().collect()
-            };
-            for denied in &filter.deny {
-                allowed.remove(denied);
-            }
-            tool_runtime.retain(&allowed);
-        }
+        let tool_runtime = self
+            .wire_tool_runtime(&execution_context, &lua_runtime)
+            .await?;
 
         // Load skills, user model, project context, and relevant memories
         let db_path = &self.loaded.config.storage.database_path;
