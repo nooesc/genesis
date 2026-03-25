@@ -413,7 +413,45 @@ async fn resolve_credentials_inner(
                     });
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "token refresh failed, using existing token");
+                    let err_msg = e.to_string();
+                    // Only reimport from Codex CLI on auth-specific failures
+                    // (400/401/403 — token revoked/invalid). Transient network
+                    // errors or 5xx responses should not overwrite the Genesis
+                    // store with potentially stale Codex CLI tokens.
+                    let is_auth_failure = err_msg.contains("status 400")
+                        || err_msg.contains("status 401")
+                        || err_msg.contains("status 403");
+                    if !is_auth_failure {
+                        tracing::warn!(error = %e, "token refresh failed (transient), using existing token");
+                    } else {
+                        tracing::warn!(error = %e, "token refresh failed (auth), trying Codex CLI import");
+
+                        // Refresh token is likely revoked (e.g. user re-logged in
+                        // via Codex CLI, which rotates the refresh token). Try to
+                        // import fresh tokens from the Codex CLI auth store.
+                        // Accept the imported token even if it's near expiry —
+                        // it's still better than a definitely-expired one.
+                        if let Some(imported) = import_codex_cli_tokens() {
+                            let api_key = imported.access_token.clone();
+                            let near_expiry = jwt::is_expiring(&api_key, TOKEN_REFRESH_SKEW_SECS);
+                            let source = store::CredentialSource::CodexMigration;
+                            store::save_codex_tokens(auth_store_path, imported, source.clone())?;
+                            if near_expiry {
+                                tracing::warn!(
+                                    "re-imported Codex CLI token is near expiry, using anyway"
+                                );
+                            } else {
+                                tracing::info!("re-imported fresh tokens from Codex CLI");
+                            }
+                            return Ok(ResolvedCredentials {
+                                provider: CODEX_PROVIDER_ID.to_owned(),
+                                base_url,
+                                api_key,
+                                source,
+                            });
+                        }
+                        tracing::warn!("no valid tokens available — run `genesis login`");
+                    } // else (is_auth_failure)
                 }
             }
         }
