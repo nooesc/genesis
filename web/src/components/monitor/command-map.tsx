@@ -1,12 +1,18 @@
 import { Background, BackgroundVariant, Controls, ReactFlow } from '@xyflow/react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { useMemo } from 'react'
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
+import { useCallback, useMemo, useState } from 'react'
 import type { CommandMapModel } from '@/lib/command-map/types'
 import { CommandMapToolbar } from './command-map-toolbar'
 import { CommandMapInspector } from './command-map-inspector'
 import { useCommandMapState } from './use-command-map-state'
 import { commandMapNodeTypes } from './node-renderers'
 import { useNodeLayout } from './use-node-layout'
+import { useIsMobile } from '@/hooks/use-mobile'
+import { RunRecipeDialog } from './run-recipe-dialog'
+import { EditTriggerDialog } from './edit-trigger-dialog'
+import { ThreadDetailsDialog } from './thread-details-dialog'
+import { EventLogDrawer } from './event-log-drawer'
 
 interface CommandMapProps {
   model: CommandMapModel
@@ -14,7 +20,15 @@ interface CommandMapProps {
   focusMode?: 'focus' | 'select'
 }
 
+type CommandMapOverlay =
+  | { kind: 'recipe'; skillName: string }
+  | { kind: 'trigger'; scheduleId: string }
+  | { kind: 'thread'; sessionId: string }
+  | { kind: 'events'; title: string; sessionId?: string | null; eventType?: string | null }
+
 export function CommandMap({ model, focusNodeId = null, focusMode = 'select' }: CommandMapProps) {
+  const isMobile = useIsMobile()
+  const [activeOverlay, setActiveOverlay] = useState<CommandMapOverlay | null>(null)
   const {
     selectedNodeId,
     selectedNode,
@@ -28,6 +42,11 @@ export function CommandMap({ model, focusNodeId = null, focusMode = 'select' }: 
     toggleFocus,
     resetView,
   } = useCommandMapState(model.nodes, { focusNodeId, focusMode })
+
+  const handleSelectNode = useCallback((nodeId: string | null) => {
+    setActiveOverlay(null)
+    selectNode(nodeId)
+  }, [selectNode])
 
   const edges = useMemo(() => {
     const visibleNodeIds = new Set(visibleNodes.map(node => node.id))
@@ -48,12 +67,34 @@ export function CommandMap({ model, focusNodeId = null, focusMode = 'select' }: 
     edges,
     selectedNodeId,
     isFocused,
-    onSelectNode: selectNode,
+    onSelectNode: handleSelectNode,
   })
 
+  const inspector = (
+    <CommandMapInspector
+      selectedNode={selectedNode}
+      onOpenRecipeDetails={(skillName) => setActiveOverlay({ kind: 'recipe', skillName })}
+      onOpenTriggerDetails={(scheduleId) => setActiveOverlay({ kind: 'trigger', scheduleId })}
+      onOpenThreadDetails={(sessionId) => setActiveOverlay({ kind: 'thread', sessionId })}
+      onOpenEventLog={(context) => setActiveOverlay({
+        kind: 'events',
+        title: context.title,
+        sessionId: context.sessionId ?? null,
+        eventType: context.eventType ?? null,
+      })}
+    />
+  )
+
   function handleReset() {
+    setActiveOverlay(null)
     resetView()
     resetLayout()
+  }
+
+  function handleMobileSheetChange(open: boolean) {
+    if (!open) {
+      handleSelectNode(null)
+    }
   }
 
   return (
@@ -108,8 +149,45 @@ export function CommandMap({ model, focusNodeId = null, focusMode = 'select' }: 
           </CardContent>
         </Card>
 
-        <CommandMapInspector selectedNode={selectedNode} />
+        {isMobile ? (
+          <Sheet open={selectedNode !== null && activeOverlay === null} onOpenChange={handleMobileSheetChange}>
+            <SheetContent side="bottom" className="h-[min(80vh,48rem)] overflow-auto">
+              <SheetHeader className="sr-only">
+                <SheetTitle>Command map selection</SheetTitle>
+                <SheetDescription>Shows details for the selected command map node.</SheetDescription>
+              </SheetHeader>
+              <div className="p-4">
+                {inspector}
+              </div>
+            </SheetContent>
+          </Sheet>
+        ) : (
+          inspector
+        )}
       </div>
+
+      <RunRecipeDialog
+        open={activeOverlay?.kind === 'recipe'}
+        onOpenChange={(open) => !open && setActiveOverlay(null)}
+        skillName={activeOverlay?.kind === 'recipe' ? activeOverlay.skillName : null}
+      />
+      <EditTriggerDialog
+        open={activeOverlay?.kind === 'trigger'}
+        onOpenChange={(open) => !open && setActiveOverlay(null)}
+        scheduleId={activeOverlay?.kind === 'trigger' ? activeOverlay.scheduleId : null}
+      />
+      <ThreadDetailsDialog
+        open={activeOverlay?.kind === 'thread'}
+        onOpenChange={(open) => !open && setActiveOverlay(null)}
+        sessionId={activeOverlay?.kind === 'thread' ? activeOverlay.sessionId : null}
+      />
+      <EventLogDrawer
+        open={activeOverlay?.kind === 'events'}
+        onOpenChange={(open) => !open && setActiveOverlay(null)}
+        title={activeOverlay?.kind === 'events' ? activeOverlay.title : 'Event log'}
+        sessionId={activeOverlay?.kind === 'events' ? activeOverlay.sessionId : null}
+        eventType={activeOverlay?.kind === 'events' ? activeOverlay.eventType : null}
+      />
     </div>
   )
 }

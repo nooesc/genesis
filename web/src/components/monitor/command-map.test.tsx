@@ -7,7 +7,112 @@ import {
   loadCommandMapPinnedPositions,
   saveCommandMapPinnedPositions,
 } from '@/lib/command-map/storage'
+import { useIsMobile } from '@/hooks/use-mobile'
 import { installStorageMock } from '@/test/storage-mock'
+
+vi.mock('@/hooks/use-mobile', () => ({
+  useIsMobile: vi.fn(),
+}))
+
+vi.mock('@tanstack/react-router', async () => {
+  const actual = await vi.importActual<typeof import('@tanstack/react-router')>('@tanstack/react-router')
+  return {
+    ...actual,
+    useNavigate: () => vi.fn(),
+  }
+})
+
+vi.mock('@/lib/api/queries/skills', () => ({
+  useSkill: () => ({
+    data: {
+      name: 'deploy-service',
+      description: 'Run the standard deployment recipe',
+      content: 'Deploy the service with the approved steps.',
+      tags: ['ops', 'release'],
+      created_at: '2026-03-24T00:00:00Z',
+      updated_at: '2026-03-24T00:00:00Z',
+    },
+    isLoading: false,
+  }),
+  useSkillUsage: () => ({
+    data: {
+      stats: { total_uses: 3, last_used_at: '2026-03-24T00:10:00Z', avg_duration_ms: 120 },
+      recent: [],
+    },
+    isLoading: false,
+  }),
+}))
+
+vi.mock('@/lib/api/queries/schedules', () => ({
+  useSchedules: () => ({
+    data: [
+      {
+        id: 'nightly',
+        cron_expression: '0 0 * * *',
+        destination: 'api',
+        prompt: 'Run nightly',
+        enabled: true,
+        created_at: '2026-03-24T00:00:00Z',
+        last_run_at: null,
+      },
+    ],
+    isLoading: false,
+  }),
+}))
+
+const toggleScheduleMock = vi.fn()
+
+vi.mock('@/lib/api/mutations/schedules', () => ({
+  useToggleSchedule: () => ({
+    mutate: toggleScheduleMock,
+    isPending: false,
+  }),
+}))
+
+vi.mock('@/lib/api/queries/sessions', () => ({
+  useSession: () => ({
+    data: {
+      id: 's1',
+      title: 'Alpha',
+      platform: 'api',
+      total_input_tokens: 10,
+      total_output_tokens: 5,
+      parent_session_id: null,
+      created_at: '2026-03-24T00:00:00Z',
+      updated_at: '2026-03-24T00:00:00Z',
+    },
+    isLoading: false,
+  }),
+  useMessages: () => ({
+    data: [
+      {
+        id: 'm1',
+        session_id: 's1',
+        role: 'user',
+        content: 'Hello there',
+        tool_call_id: null,
+        tool_calls_json: null,
+        created_at: '2026-03-24T00:01:00Z',
+      },
+    ],
+    isLoading: false,
+  }),
+}))
+
+vi.mock('@/lib/api/queries/audit', () => ({
+  useAuditLog: () => ({
+    data: [
+      {
+        id: 'a1',
+        event_type: 'stuck_loop',
+        session_id: 's1',
+        details: '{"tool":"shell","failure_count":3}',
+        created_at: '2026-03-24T00:00:00Z',
+      },
+    ],
+    isLoading: false,
+  }),
+}))
 
 vi.mock('@xyflow/react', async () => {
   const ReactModule = await import('react')
@@ -144,6 +249,7 @@ const offlineModel: CommandMapModel = {
 describe('CommandMap', () => {
   beforeEach(() => {
     installStorageMock()
+    vi.mocked(useIsMobile).mockReturnValue(false)
   })
 
   it('renders Eve, layer toggles, and inspector state', async () => {
@@ -171,6 +277,53 @@ describe('CommandMap', () => {
     expect(screen.getByRole('heading', { name: /Alpha/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Focus/i })).toHaveAttribute('aria-pressed', 'true')
     expect(screen.getAllByText(/session-s1/i)).not.toHaveLength(0)
+  })
+
+  it('opens a recipe details dialog from the inspector', async () => {
+    render(<CommandMap model={model} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /^deploy-service(?:\s|$)/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Recipe details/i }))
+
+    expect(await screen.findByRole('dialog')).toHaveTextContent(/deploy-service/i)
+  })
+
+  it('opens a trigger dialog from the inspector', async () => {
+    render(<CommandMap model={model} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /^nightly(?:\s|$)/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Trigger details/i }))
+
+    expect(await screen.findByRole('dialog')).toHaveTextContent(/nightly/i)
+  })
+
+  it('opens a thread details dialog from the inspector', async () => {
+    render(<CommandMap model={model} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /^Alpha(?:\s|$)/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Thread details/i }))
+
+    expect(await screen.findByRole('dialog')).toHaveTextContent(/Alpha/i)
+  })
+
+  it('opens an event log drawer from the inspector', async () => {
+    render(<CommandMap model={model} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /^Model(?:\s|$)/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Event log/i }))
+
+    expect(await screen.findByRole('dialog')).toHaveTextContent(/Event log/i)
+  })
+
+  it('uses a sheet on mobile when a node is selected', async () => {
+    vi.mocked(useIsMobile).mockReturnValue(true)
+
+    render(<CommandMap model={model} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /^Alpha(?:\s|$)/i }))
+
+    expect(await screen.findByRole('dialog')).toHaveTextContent(/Alpha/i)
+    expect(screen.queryByText(/Select a node to inspect/i)).not.toBeInTheDocument()
   })
 
   it('keeps recipes visible during declutter alongside triggers', async () => {
