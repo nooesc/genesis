@@ -145,7 +145,7 @@ fn score_signal_to_noise(trajectory: &Trajectory, issues: &mut Vec<String>) -> f
             empty_steps += 1;
         }
         if let Some(result) = &step.tool_result {
-            if result.starts_with("Error:") || result.starts_with("error:") {
+            if crate::agent_loop::is_tool_error(result) {
                 error_steps += 1;
             }
         }
@@ -240,7 +240,7 @@ fn score_efficiency(trajectory: &Trajectory, issues: &mut Vec<String>) -> f64 {
             s.action_type == ActionType::ToolResult
                 && s.tool_result
                     .as_ref()
-                    .is_some_and(|r| r.starts_with("Error:") || r.starts_with("error:"))
+                    .is_some_and(|r| crate::agent_loop::is_tool_error(r))
         })
         .count();
 

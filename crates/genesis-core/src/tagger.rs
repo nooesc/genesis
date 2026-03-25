@@ -228,7 +228,7 @@ fn tag_by_content(trajectory: &Trajectory, tags: &mut HashSet<String>) {
         .filter(|s| {
             s.tool_result
                 .as_ref()
-                .is_some_and(|r| r.starts_with("Error:") || r.starts_with("error:"))
+                .is_some_and(|r| crate::agent_loop::is_tool_error(r))
         })
         .count();
 
