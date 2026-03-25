@@ -31,7 +31,7 @@ describe('buildCommandMapModel', () => {
       {
         name: 'deploy-service',
         description: 'Run the standard deployment recipe',
-        content: 'Deploy the service with the approved steps.',
+        instructions: 'Deploy the service with the approved steps.',
         tags: ['ops', 'release'],
         created_at: '2026-03-24T00:00:00Z',
         updated_at: '2026-03-24T00:00:00Z',
@@ -87,6 +87,29 @@ describe('buildCommandMapModel', () => {
     expect(recipe?.kind).toBe('recipe')
     expect(recipe?.layer).toBe('recipe')
     expect(recipe?.ring).toBe(COMMAND_MAP_RINGS.recipe)
+    expect(recipe?.data?.instruction_length).toBe(43)
+  })
+
+  it('projects recipe nodes from instructions-backed skills', () => {
+    const model = buildCommandMapModel({
+      ...baseInput,
+      skills: [
+        {
+          name: 'deploy-service',
+          description: 'Run the standard deployment recipe',
+          instructions: 'Deploy the service with the approved steps.',
+          trigger_hint: 'manual',
+          version: '2',
+          tags: ['ops', 'release'],
+          created_at: '2026-03-24T00:00:00Z',
+          updated_at: '2026-03-24T00:00:00Z',
+        } as never,
+      ],
+    })
+
+    const recipe = model.nodes.find(node => node.id === 'skill-deploy-service')
+    expect(recipe).toBeDefined()
+    expect(recipe?.subtitle).toContain('Run the standard deployment recipe')
   })
 
   it('derives alert nodes from failed or degraded audit entries', () => {

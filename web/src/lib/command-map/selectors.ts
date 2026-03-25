@@ -172,12 +172,12 @@ export function buildRecipeNodes(input: CommandMapProjectionInput): CommandMapNo
         makeNodeId('skill', skill.name),
         skill.name,
         subtitleParts.join(' · ') || 'saved recipe',
-        skill.content.trim().length > 0 || skill.description.trim().length > 0 ? 'ok' : 'idle',
+        skill.instructions.trim().length > 0 || skill.description.trim().length > 0 ? 'ok' : 'idle',
       ),
       data: {
         skill_name: skill.name,
         tag_count: skill.tags.length,
-        content_length: skill.content.length,
+        instruction_length: skill.instructions.length,
       },
     }
   })

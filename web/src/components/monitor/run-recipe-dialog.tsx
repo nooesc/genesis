@@ -71,9 +71,9 @@ export function RunRecipeDialog({ open, onOpenChange, skillName }: RunRecipeDial
               </div>
             </div>
 
-            {skill.content && (
+            {skill.instructions && (
               <pre className="max-h-56 overflow-auto rounded-lg border border-border/20 bg-muted/20 p-3 font-mono text-[11px] leading-relaxed text-foreground/80">
-                {skill.content}
+                {skill.instructions}
               </pre>
             )}
           </div>

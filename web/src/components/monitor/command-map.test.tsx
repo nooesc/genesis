@@ -27,8 +27,10 @@ vi.mock('@/lib/api/queries/skills', () => ({
     data: {
       name: 'deploy-service',
       description: 'Run the standard deployment recipe',
-      content: 'Deploy the service with the approved steps.',
+      instructions: 'Deploy the service with the approved steps.',
       tags: ['ops', 'release'],
+      trigger_hint: 'manual',
+      version: '2',
       created_at: '2026-03-24T00:00:00Z',
       updated_at: '2026-03-24T00:00:00Z',
     },

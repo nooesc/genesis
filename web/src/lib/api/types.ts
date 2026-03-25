@@ -77,8 +77,10 @@ export interface StoredMessage {
 export interface Skill {
   name: string
   description: string
-  content: string
+  instructions: string
   tags: string[]
+  trigger_hint?: string | null
+  version?: string | null
   created_at: string
   updated_at: string
 }

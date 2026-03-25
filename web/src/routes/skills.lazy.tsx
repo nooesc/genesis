@@ -40,7 +40,7 @@ function SkillCard({
   onDelete: () => void
 }) {
   const [expanded, setExpanded] = React.useState(false)
-  const hasContent = skill.content && skill.content.length > 0
+  const hasInstructions = skill.instructions && skill.instructions.length > 0
 
   return (
     <div className="group rounded-md border border-border/30 bg-card/30 p-3 transition-colors hover:border-border/50">
@@ -76,18 +76,18 @@ function SkillCard({
       )}
 
       {/* Expandable content */}
-      {hasContent && (
+      {hasInstructions && (
         <button
           onClick={() => setExpanded(v => !v)}
           className="flex items-center gap-1 font-mono text-[9px] text-muted-foreground/40 transition-colors hover:text-muted-foreground"
         >
           {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-          {expanded ? 'hide content' : 'show content'}
+          {expanded ? 'hide instructions' : 'show instructions'}
         </button>
       )}
-      {expanded && hasContent && (
+      {expanded && hasInstructions && (
         <pre className="mt-1.5 max-h-48 overflow-auto whitespace-pre-wrap rounded bg-muted/20 px-2 py-1.5 font-mono text-[10px] leading-relaxed text-foreground/50">
-          {skill.content}
+          {skill.instructions}
         </pre>
       )}
 
@@ -103,19 +103,19 @@ function NewSkillDialog({ open, onClose }: { open: boolean; onClose: () => void 
   const createSkill = useCreateSkill()
   const [name, setName] = React.useState('')
   const [description, setDescription] = React.useState('')
-  const [content, setContent] = React.useState('')
+  const [instructions, setInstructions] = React.useState('')
   const [tags, setTags] = React.useState('')
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     if (!name.trim()) return
     createSkill.mutate(
-      {
-        name: name.trim(),
-        description: description.trim(),
-        content: content.trim(),
-        tags: tags.split(',').map(t => t.trim()).filter(Boolean),
-      },
+        {
+          name: name.trim(),
+          description: description.trim(),
+          instructions: instructions.trim(),
+          tags: tags.split(',').map(t => t.trim()).filter(Boolean),
+        },
       {
         onSuccess: () => {
           toast.success(`Skill "${name}" created`)
@@ -131,7 +131,7 @@ function NewSkillDialog({ open, onClose }: { open: boolean; onClose: () => void 
   function handleClose() {
     setName('')
     setDescription('')
-    setContent('')
+    setInstructions('')
     setTags('')
     onClose()
   }
@@ -152,8 +152,8 @@ function NewSkillDialog({ open, onClose }: { open: boolean; onClose: () => void 
             <Input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Brief description" className="font-mono text-xs" />
           </div>
           <div className="flex flex-col gap-1.5">
-            <Label className="font-mono text-xs">Content</Label>
-            <Textarea value={content} onChange={(e) => setContent(e.target.value)} placeholder="Skill content..." className="font-mono text-xs" rows={5} />
+            <Label className="font-mono text-xs">Instructions</Label>
+            <Textarea value={instructions} onChange={(e) => setInstructions(e.target.value)} placeholder="Skill instructions..." className="font-mono text-xs" rows={5} />
           </div>
           <div className="flex flex-col gap-1.5">
             <Label className="font-mono text-xs">Tags (comma-separated)</Label>
