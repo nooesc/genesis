@@ -32,6 +32,7 @@ use genesis_lua::hooks::PreHookOutcome;
 use genesis_lua::LuaRuntime;
 
 use tools::execute_tool_calls_parallel;
+pub(crate) use tools::is_tool_error;
 use types::{format_blocked_reasons, MEMORY_NUDGE, SKILL_CREATION_THRESHOLD};
 
 /// The core agent loop that wires provider (LLM) and tool execution together.
@@ -1206,6 +1207,110 @@ impl AgentLoop {
              (4) asking the user for clarification."
         );
         let _ = self.push_message_with_lua_hooks(&hook_session, ChatMessage::system(&nudge));
+    }
+
+    /// Unified tool-result processing pipeline.
+    ///
+    /// This replaces three copy-pasted loops (blocking, streaming-success,
+    /// streaming-fallback) with a single method. All hooks, discovery, failure
+    /// tracking, trajectory recording, and event emission happen here.
+    ///
+    /// Returns `Some(question)` when a tool requests user clarification,
+    /// signalling the caller to pause the agent loop.
+    pub(crate) fn process_tool_results<F>(
+        &mut self,
+        session_id: &str,
+        effective_tool_calls: &[ToolCallEntry],
+        veto_reasons: Vec<Option<String>>,
+        executed_results: Vec<(String, bool)>,
+        tool_elapsed_ms: u64,
+        is_streaming: bool,
+        mut on_event: F,
+    ) -> Option<String>
+    where
+        F: FnMut(StreamEvent<'_>),
+    {
+        let mut executed_results = executed_results.into_iter();
+        let mut clarification = None;
+        for (tc, veto_reason) in effective_tool_calls.iter().zip(veto_reasons.into_iter()) {
+            let lua_vetoed = veto_reason.is_some();
+            let (mut result, requires_input) = match veto_reason {
+                Some(reason) => (
+                    format!("Error: tool call blocked by Lua hook: {reason}"),
+                    false,
+                ),
+                None => executed_results
+                    .next()
+                    .expect("executed tool results should align with allowed calls"),
+            };
+            result = sanitize::sanitize_credentials(&result);
+            // When find_tools returns results and core set filtering is active,
+            // extract discovered tool names and add them to the active set.
+            if self.config.core_tools.is_some()
+                && tc.function.name == "find_tools"
+                && !tools::is_tool_error(&result)
+                && !tools::is_find_tools_empty(&result)
+            {
+                for line in result.lines() {
+                    let trimmed = line.trim();
+                    // find_tools output format: "  **tool_name** — description"
+                    if let Some(rest) = trimmed.strip_prefix("**") {
+                        if let Some(name_end) = rest.find("**") {
+                            self.discover_tool(&rest[..name_end]);
+                        }
+                    }
+                }
+            }
+
+            let success = !tools::is_tool_error(&result);
+            if success && self.config.core_tools.is_some() {
+                // Auto-discover tools called outside the core set.
+                self.discover_tool(&tc.function.name);
+            }
+            let result = self.run_lua_post_tool_call(&tc.function.name, &result);
+            if !success {
+                let count = self
+                    .tool_failure_counts
+                    .entry(tc.function.name.clone())
+                    .or_insert(0);
+                *count += 1;
+            } else {
+                self.tool_failure_counts.remove(&tc.function.name);
+            }
+            self.hooks
+                .on_tool_call_end(session_id, &tc.function.name, success, tool_elapsed_ms);
+            on_event(StreamEvent::ToolCallEnd {
+                name: &tc.function.name,
+                call_id: &tc.id,
+                duration_ms: tool_elapsed_ms,
+                success,
+            });
+            self.fire_shell_hooks(
+                HookEvent::PostToolCall,
+                serde_json::json!({
+                    "session_id": session_id,
+                    "tool_name": tc.function.name,
+                    "tool_call_id": tc.id,
+                    "success": success,
+                    "result": result,
+                    "requires_input": requires_input,
+                    "streaming": is_streaming,
+                    "duration_ms": tool_elapsed_ms,
+                    "lua_vetoed": lua_vetoed,
+                }),
+            );
+            let result = self
+                .push_message_with_lua_hooks(session_id, ChatMessage::tool_result(&tc.id, result))
+                .and_then(|message| message.content_text().map(str::to_owned))
+                .unwrap_or_default();
+            self.trajectory
+                .record_tool_result(&tc.function.name, &result);
+            if requires_input {
+                on_event(StreamEvent::ClarificationNeeded { question: &result });
+                clarification = Some(result.clone());
+            }
+        }
+        clarification
     }
 
     /// Save the trajectory to disk if a trajectory directory is configured.
