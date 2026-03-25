@@ -418,19 +418,26 @@ async fn resolve_credentials_inner(
                     // Refresh token is likely revoked (e.g. user re-logged in
                     // via Codex CLI, which rotates the refresh token). Try to
                     // import fresh tokens from the Codex CLI auth store.
+                    // Accept the imported token even if it's near expiry —
+                    // it's still better than a definitely-expired one.
                     if let Some(imported) = import_codex_cli_tokens() {
-                        if !jwt::is_expiring(&imported.access_token, TOKEN_REFRESH_SKEW_SECS) {
-                            let api_key = imported.access_token.clone();
-                            let source = store::CredentialSource::CodexMigration;
-                            store::save_codex_tokens(auth_store_path, imported, source.clone())?;
+                        let api_key = imported.access_token.clone();
+                        let near_expiry = jwt::is_expiring(&api_key, TOKEN_REFRESH_SKEW_SECS);
+                        let source = store::CredentialSource::CodexMigration;
+                        store::save_codex_tokens(auth_store_path, imported, source.clone())?;
+                        if near_expiry {
+                            tracing::warn!(
+                                "re-imported Codex CLI token is near expiry, using anyway"
+                            );
+                        } else {
                             tracing::info!("re-imported fresh tokens from Codex CLI");
-                            return Ok(ResolvedCredentials {
-                                provider: CODEX_PROVIDER_ID.to_owned(),
-                                base_url,
-                                api_key,
-                                source,
-                            });
                         }
+                        return Ok(ResolvedCredentials {
+                            provider: CODEX_PROVIDER_ID.to_owned(),
+                            base_url,
+                            api_key,
+                            source,
+                        });
                     }
                     tracing::warn!("no valid tokens available — run `genesis login`");
                 }
