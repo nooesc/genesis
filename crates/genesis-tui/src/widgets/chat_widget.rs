@@ -7,7 +7,7 @@
 
 use std::collections::HashSet;
 
-use crate::history::agent_cell::{prefix_markdown_lines, AgentCell};
+use crate::history::agent_cell::{continuation_markdown_lines, prefix_markdown_lines, AgentCell};
 use crate::history::cell::HistoryCell;
 use crate::history::tool_cell::{tool_group_summary_line, ToolCell, ToolDisplayMode};
 use crate::history::user_cell::UserCell;
@@ -41,6 +41,10 @@ pub struct ActiveCell {
     /// and emits complete blocks for committing as `HistoryCell` entries.
     pub block_collector: StreamingBlockCollector,
     pub tool_calls: Vec<ActiveToolCall>,
+    /// Whether the first text block of this turn has been committed.
+    /// Used to decide whether subsequent blocks are continuations (indent
+    /// only, no `eve> ` prefix).
+    pub first_block_committed: bool,
 }
 
 /// Cache for the active cell's rendered markdown lines.
@@ -146,20 +150,30 @@ impl ChatWidget {
 
     // ── Scroll ────────────────────────────────────────────────────────────
 
-    /// Compute the maximum allowed scroll offset for the current content
-    /// at the given viewport width. Only counts committed cells (not the
-    /// active streaming cell) because `render_messages` hides the active
-    /// cell when the user has scrolled up.
-    fn scroll_max(&mut self, viewport_width: u16) -> usize {
-        self.committed_content_height(viewport_width)
+    /// Compute the maximum allowed scroll offset for the current content.
+    ///
+    /// The offset is clamped so the oldest content can reach the top of
+    /// the viewport but never scrolls further (no blank screen). When
+    /// total content fits within the viewport, returns 0.
+    ///
+    /// Accounts for hint rows: when scrolled, the renderer reserves 1 row
+    /// for "↑ N more" (top) and 1 row for "↓ scrolled up" (bottom), so
+    /// only `viewport_height - 2` rows show actual content.
+    fn scroll_max(&mut self, viewport_width: u16, viewport_height: u16) -> usize {
+        let total = self.committed_content_height(viewport_width);
+        // Reserve 2 rows for hints when scrolled.
+        let visible = (viewport_height as usize).saturating_sub(2);
+        total.saturating_sub(visible)
     }
 
-    /// Scroll the chat view up by `rows` rows, clamped to the visible
-    /// content height so the offset never grows unbounded.
-    pub fn scroll_up(&mut self, rows: usize, viewport_width: u16) {
-        let max = self.scroll_max(viewport_width);
+    /// Scroll the chat view up by `rows` rows, clamped so the oldest
+    /// content can reach the top but you can't scroll into blank space.
+    pub fn scroll_up(&mut self, rows: usize, viewport_width: u16, viewport_height: u16) {
+        let max = self.scroll_max(viewport_width, viewport_height);
         self.scroll_offset = self.scroll_offset.saturating_add(rows).min(max);
-        self.scroll_locked = true;
+        if self.scroll_offset > 0 {
+            self.scroll_locked = true;
+        }
     }
 
     /// Scroll the chat view down by `rows` rows. Re-enables auto-scroll
@@ -187,11 +201,11 @@ impl ChatWidget {
     /// When the terminal width changes, wrapped content takes a different
     /// number of rows. If the old offset now exceeds the new maximum,
     /// this brings it back in range (or snaps to bottom if it would be 0).
-    pub fn reclamp_scroll(&mut self, viewport_width: u16) {
+    pub fn reclamp_scroll(&mut self, viewport_width: u16, viewport_height: u16) {
         if !self.scroll_locked {
             return;
         }
-        let max = self.scroll_max(viewport_width);
+        let max = self.scroll_max(viewport_width, viewport_height);
         if self.scroll_offset > max {
             self.scroll_offset = max;
         }
@@ -226,6 +240,7 @@ impl ChatWidget {
         self.active_cell = Some(ActiveCell {
             block_collector: StreamingBlockCollector::new(),
             tool_calls: Vec::new(),
+            first_block_committed: false,
         });
         self.active_cell_cache = None;
         self.streaming_buffer.reset();
@@ -270,8 +285,19 @@ impl ChatWidget {
                 }
             }
             for block in emitted_blocks {
-                self.committed_cells
-                    .push(HistoryCell::Agent(AgentCell::new(block)));
+                let is_continuation = self
+                    .active_cell
+                    .as_ref()
+                    .is_some_and(|c| c.first_block_committed);
+                let agent_cell = if is_continuation {
+                    AgentCell::new_continuation(block)
+                } else {
+                    if let Some(ac) = &mut self.active_cell {
+                        ac.first_block_committed = true;
+                    }
+                    AgentCell::new(block)
+                };
+                self.committed_cells.push(HistoryCell::Agent(agent_cell));
                 self.bump_revision();
             }
             return true;
@@ -308,6 +334,45 @@ impl ChatWidget {
         } else {
             Some(combined)
         }
+    }
+
+    /// Return styled lines for in-progress tool calls in the active cell.
+    ///
+    /// Shows a single summary line for tool calls being executed, so the
+    /// user sees activity in the chat area during tool execution (not just
+    /// in the status bar).
+    fn active_tool_lines(&self) -> Vec<Line<'static>> {
+        let cell = match &self.active_cell {
+            Some(c) if !c.tool_calls.is_empty() => c,
+            _ => return Vec::new(),
+        };
+        let dim = Style::default().fg(self.theme_dim);
+        let accent = Style::default().fg(self.theme_accent);
+        let ok_color = Style::default().fg(ratatui::style::Color::Rgb(100, 200, 100));
+        let prefix_indent = "     "; // matches "eve> " width
+
+        let mut lines = Vec::new();
+        for tc in &cell.tool_calls {
+            let (icon, icon_style) = match tc.success {
+                Some(true) => ("\u{2713} ", ok_color), // ✓
+                Some(false) => (
+                    "\u{2717} ",
+                    Style::default().fg(ratatui::style::Color::Rgb(200, 100, 100)),
+                ),
+                None => ("\u{2022} ", accent), // • (running)
+            };
+            let dur = tc
+                .duration
+                .map(|d| format!(" {:.1}s", d.as_secs_f64()))
+                .unwrap_or_default();
+            lines.push(Line::from(vec![
+                Span::raw(prefix_indent.to_owned()),
+                Span::styled(icon.to_owned(), icon_style),
+                Span::styled(tc.tool_name.clone(), dim),
+                Span::styled(dur, dim),
+            ]));
+        }
+        lines
     }
 
     /// Record a tool call starting in the active cell.
@@ -355,17 +420,29 @@ impl ChatWidget {
             if let Some(cell) = &mut self.active_cell {
                 for line in SplitKeepNewlines::new(&remaining) {
                     if let Some(block) = cell.block_collector.push_line(line) {
-                        self.committed_cells
-                            .push(HistoryCell::Agent(AgentCell::new(block)));
+                        let agent_cell = if cell.first_block_committed {
+                            AgentCell::new_continuation(block)
+                        } else {
+                            cell.first_block_committed = true;
+                            AgentCell::new(block)
+                        };
+                        self.committed_cells.push(HistoryCell::Agent(agent_cell));
                     }
                 }
             }
         }
         // Flush any remaining partial block in the collector.
         if let Some(cell) = &mut self.active_cell {
-            if let Some(block) = cell.block_collector.finalize() {
-                self.committed_cells
-                    .push(HistoryCell::Agent(AgentCell::new(block)));
+            let agent_cell_opt = cell.block_collector.finalize().map(|block| {
+                if cell.first_block_committed {
+                    AgentCell::new_continuation(block)
+                } else {
+                    cell.first_block_committed = true;
+                    AgentCell::new(block)
+                }
+            });
+            if let Some(agent_cell) = agent_cell_opt {
+                self.committed_cells.push(HistoryCell::Agent(agent_cell));
             }
         }
 
@@ -577,15 +654,19 @@ impl ChatWidget {
                 }
                 // Reuse the active cell cache when possible to avoid redundant
                 // markdown re-parsing.
+                let is_cont = self
+                    .active_cell
+                    .as_ref()
+                    .is_some_and(|c| c.first_block_committed);
                 let h = if let Some(cache) = self.active_cell_cache.as_ref() {
                     if cache.parsed_len == preview.len() && cache.parsed_width == width {
                         wrapped_row_count(&cache.lines, width).max(1)
                     } else {
-                        let lines = crate::history::agent_cell::prefix_markdown_lines(&preview);
+                        let lines = active_cell_lines(&preview, width, is_cont);
                         wrapped_row_count(&lines, width).max(1)
                     }
                 } else {
-                    let lines = crate::history::agent_cell::prefix_markdown_lines(&preview);
+                    let lines = active_cell_lines(&preview, width, is_cont);
                     wrapped_row_count(&lines, width).max(1)
                 };
                 total = total.saturating_add(h);
@@ -723,7 +804,12 @@ impl ChatWidget {
                 .as_ref()
                 .is_none_or(|c| c.parsed_len != text_len || c.parsed_width != width);
             if needs_reparse {
-                let lines = active_cell_lines(active_preview.as_ref().unwrap(), width);
+                let is_continuation = self
+                    .active_cell
+                    .as_ref()
+                    .is_some_and(|c| c.first_block_committed);
+                let lines =
+                    active_cell_lines(active_preview.as_ref().unwrap(), width, is_continuation);
                 self.active_cell_cache = Some(ActiveCellCache {
                     parsed_len: text_len,
                     parsed_width: width,
@@ -797,6 +883,30 @@ impl ChatWidget {
             }
         }
 
+        // ── In-progress tool call indicators ─────────────────────────
+        // Show active tool calls below committed cells but above the
+        // streaming text, so users see tool activity in the chat area.
+        if !self.scroll_locked {
+            let tool_lines = self.active_tool_lines();
+            let tool_rows = tool_lines.len() as u16;
+            if tool_rows > 0 && remaining_rows > 0 {
+                let usable = tool_rows.min(remaining_rows);
+                let tool_y = bottom_y - active_cell_rows - usable;
+                let tool_area = Rect {
+                    x: area.x,
+                    y: tool_y,
+                    width: area.width,
+                    height: usable,
+                };
+                // Only show the last `usable` lines if there are more tools than rows.
+                let skip = tool_lines.len().saturating_sub(usable as usize);
+                let visible_lines: Vec<Line<'_>> = tool_lines.into_iter().skip(skip).collect();
+                Paragraph::new(visible_lines).render(tool_area, buf);
+                active_cell_rows += usable;
+                remaining_rows -= usable;
+            }
+        }
+
         if remaining_rows == 0 {
             return;
         }
@@ -832,6 +942,13 @@ impl ChatWidget {
         let mut cells_collected = 0usize;
         let num_cells = self.committed_cells.len();
 
+        // When the user has scrolled up, collect extra cells beyond the
+        // viewport so that after skipping the newest entries (scroll offset),
+        // older cells fill the freed space. Without this, scrolling up
+        // would show empty space instead of earlier messages.
+        let scroll_extra = u16::try_from(self.scroll_offset).unwrap_or(u16::MAX);
+        let collection_budget = remaining_rows.saturating_add(scroll_extra);
+
         let mut i = num_cells;
         while i > 0 {
             i -= 1;
@@ -861,7 +978,7 @@ impl ChatWidget {
                         let cur_is_user = false;
                         let needs_sep = prev_is_user.is_some_and(|prev| prev != cur_is_user);
                         let cost = h + if needs_sep { 1 } else { 0 };
-                        if used + cost > remaining_rows {
+                        if used + cost > collection_budget {
                             break;
                         }
 
@@ -896,7 +1013,7 @@ impl ChatWidget {
             // height budget.
             let needs_sep = prev_is_user.is_some_and(|prev| prev != cur_is_user);
             let cost = h + if needs_sep { 1 } else { 0 };
-            if used + cost > remaining_rows {
+            if used + cost > collection_budget {
                 // If this is the FIRST cell we're trying to add and it's
                 // taller than the viewport, add it anyway — it will be
                 // clipped to the viewport height during rendering (showing
@@ -907,7 +1024,7 @@ impl ChatWidget {
                     // appear (if entries is empty and this cell didn't fit,
                     // there are older messages above → skipped_message_count > 0).
                     let hint_reserve: u16 = 1;
-                    let clamped_h = remaining_rows
+                    let clamped_h = collection_budget
                         .saturating_sub(if needs_sep { 1 } else { 0 })
                         .saturating_sub(hint_reserve);
                     if clamped_h > 0 {
@@ -936,13 +1053,38 @@ impl ChatWidget {
             prev_is_user = Some(cur_is_user);
         }
 
-        // Count message cells (User/Agent) that were clipped above.
-        let skipped_message_count = self
-            .committed_cells
-            .iter()
-            .take(self.committed_cells.len().saturating_sub(cells_collected))
-            .filter(|c| matches!(c, HistoryCell::User(_) | HistoryCell::Agent(_)))
-            .count();
+        // Count conversation *turns* (not individual blocks) clipped above.
+        // With per-block-cell architecture, one agent response may span
+        // multiple AgentCell entries. Collapse consecutive Agent cells into
+        // one turn so the hint says "↑ 2 more" for 2 turns, not "↑ 12 more"
+        // for 12 paragraph blocks.
+        let skipped_message_count = {
+            let skipped = self
+                .committed_cells
+                .iter()
+                .take(self.committed_cells.len().saturating_sub(cells_collected));
+            let mut turns = 0usize;
+            let mut prev_is_agent = false;
+            for cell in skipped {
+                match cell {
+                    HistoryCell::User(_) => {
+                        turns += 1;
+                        prev_is_agent = false;
+                    }
+                    HistoryCell::Agent(_) => {
+                        if !prev_is_agent {
+                            turns += 1;
+                        }
+                        prev_is_agent = true;
+                    }
+                    HistoryCell::Tool(_) => {
+                        // Tools are part of the agent turn, don't count separately.
+                        prev_is_agent = false;
+                    }
+                }
+            }
+            turns
+        };
 
         // Also account for a separator between the last committed cell
         // and the active cell, if the active cell was rendered above.
@@ -1110,8 +1252,12 @@ impl Default for ChatWidget {
 ///
 /// Uses the same `eve> ` prefix/indent pattern as [`AgentCell`], with
 /// markdown formatting applied so styles appear live as the agent types.
-fn active_cell_lines(text: &str, _width: u16) -> Vec<Line<'static>> {
-    prefix_markdown_lines(text)
+fn active_cell_lines(text: &str, _width: u16, is_continuation: bool) -> Vec<Line<'static>> {
+    if is_continuation {
+        continuation_markdown_lines(text)
+    } else {
+        prefix_markdown_lines(text)
+    }
 }
 
 /// Iterator that splits a string at newline boundaries, keeping the trailing
@@ -1543,6 +1689,57 @@ mod tests {
         assert!(
             !has_indicator,
             "should not show overflow indicator when all messages fit"
+        );
+    }
+
+    #[test]
+    fn scroll_up_reveals_user_message_after_long_response() {
+        let mut cw = ChatWidget::new();
+        cw.add_user_message("my original question".to_string());
+        cw.start_turn();
+        // Create a long response with many blocks (paragraphs separated by blank lines).
+        for i in 0..20 {
+            cw.append_text(&format!("paragraph {i} content\n\n"));
+        }
+        // Drain all streaming buffer ticks to commit blocks.
+        while cw.tick_streaming() {}
+        cw.complete_turn();
+
+        // Use a small viewport that can't fit all blocks.
+        let area = Rect::new(0, 0, 60, 10);
+
+        // Helper to extract all text from a buffer.
+        let buf_text = |buf: &Buffer| -> String {
+            let mut text = String::new();
+            for row in 0..area.height {
+                for col in 0..area.width {
+                    if let Some(c) = buf.cell((col, row)) {
+                        text.push_str(c.symbol());
+                    }
+                }
+            }
+            text
+        };
+
+        let mut buf = Buffer::empty(area);
+        cw.render_messages(area, &mut buf);
+
+        // Initially, user message is clipped (too many agent blocks).
+        assert!(
+            !buf_text(&buf).contains("my original question"),
+            "user message should be clipped initially"
+        );
+
+        // Scroll up far enough to reach the user message.
+        for _ in 0..50 {
+            cw.scroll_up(1, area.width, area.height);
+        }
+
+        let mut buf2 = Buffer::empty(area);
+        cw.render_messages(area, &mut buf2);
+        assert!(
+            buf_text(&buf2).contains("my original question"),
+            "scrolling up should reveal the user's message"
         );
     }
 

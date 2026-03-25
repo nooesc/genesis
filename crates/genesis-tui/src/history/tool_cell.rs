@@ -541,7 +541,7 @@ impl ToolCell {
 
 /// Render a collapsed tool group as a single styled [`Line`].
 ///
-/// Format: `  ▸ N tool calls (Xs, all ok)` or `  ▸ N tool calls (Xs, M failed)`
+/// Format: `  ▸ N tool calls: name1, name2, … (Xs, all ok)`
 pub fn tool_group_summary_line(cells: &[&ToolCell]) -> Line<'static> {
     let count = cells.len();
     let total_dur: Duration = cells.iter().map(|c| c.duration).sum();
@@ -554,12 +554,30 @@ pub fn tool_group_summary_line(cells: &[&ToolCell]) -> Line<'static> {
         (format!("{fail_count} failed"), COLOR_FAIL)
     };
 
+    // Collect unique tool names in call order, truncated to fit.
+    let mut names: Vec<&str> = Vec::new();
+    for c in cells {
+        if !names.contains(&c.tool_name.as_str()) {
+            names.push(&c.tool_name);
+        }
+    }
+    // Show up to 3 unique names, then "…".
+    let names_str = if names.len() <= 3 {
+        names.join(", ")
+    } else {
+        format!("{}, +{} more", names[..2].join(", "), names.len() - 2)
+    };
+
     Line::from(vec![
         Span::styled("  ", Style::default().fg(UI_DIM)),
         Span::styled("▸ ", Style::default().fg(Color::Rgb(180, 167, 214))),
         Span::styled(
             format!("{count} tool calls"),
             Style::default().fg(Color::Rgb(168, 168, 168)),
+        ),
+        Span::styled(
+            format!(": {names_str}"),
+            Style::default().fg(Color::Rgb(140, 140, 140)),
         ),
         Span::styled(format!(" ({dur_str}, "), Style::default().fg(UI_DIM)),
         Span::styled(status, Style::default().fg(status_color)),
@@ -1252,6 +1270,13 @@ diff --git a/src/main.rs b/src/main.rs
             "should show total duration: {text:?}"
         );
         assert!(text.contains("all ok"), "should show all ok: {text:?}");
+        // Tool names should be listed in the summary.
+        assert!(text.contains("shell"), "should show tool name: {text:?}");
+        assert!(
+            text.contains("read_file"),
+            "should show tool name: {text:?}"
+        );
+        assert!(text.contains("grep"), "should show tool name: {text:?}");
     }
 
     #[test]

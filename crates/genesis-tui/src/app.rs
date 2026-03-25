@@ -82,6 +82,9 @@ pub struct App {
     pub overlay: Option<ActiveOverlay>,
     /// Last known viewport height (used to pass visible_rows to the overlay).
     pub viewport_height: u16,
+    /// Last computed message area height (viewport minus status bar, input, separator).
+    /// Updated each frame for accurate scroll clamping.
+    pub message_area_height: u16,
     /// Slash command popup (shown when input starts with `/`).
     pub command_popup: CommandPopup,
     /// Interactive clarification picker (shown when agent asks a question with choices).
@@ -164,7 +167,11 @@ impl App {
                     self.frame_requester.schedule_frame();
                 } else if matches!(self.screen, AppScreen::Chat) {
                     if delta > 0 {
-                        self.chat.scroll_up(delta as usize, self.viewport_width);
+                        self.chat.scroll_up(
+                            delta as usize,
+                            self.viewport_width,
+                            self.message_area_height,
+                        );
                     } else if delta < 0 {
                         self.chat.scroll_down((-delta) as usize);
                     }
@@ -636,13 +643,14 @@ impl App {
         // ── Chat scroll-back ──────────────────────────────────────
         match key.code {
             KeyCode::PageUp => {
-                let half = (self.viewport_height / 2).max(1) as usize;
-                self.chat.scroll_up(half, self.viewport_width);
+                let half = (self.message_area_height / 2).max(1) as usize;
+                self.chat
+                    .scroll_up(half, self.viewport_width, self.message_area_height);
                 self.frame_requester.schedule_frame();
                 return;
             }
             KeyCode::PageDown => {
-                let half = (self.viewport_height / 2).max(1) as usize;
+                let half = (self.message_area_height / 2).max(1) as usize;
                 self.chat.scroll_down(half);
                 self.frame_requester.schedule_frame();
                 return;
@@ -658,7 +666,8 @@ impl App {
         if key.modifiers.contains(KeyModifiers::SHIFT) {
             match key.code {
                 KeyCode::Up => {
-                    self.chat.scroll_up(1, self.viewport_width);
+                    self.chat
+                        .scroll_up(1, self.viewport_width, self.message_area_height);
                     self.frame_requester.schedule_frame();
                     return;
                 }
@@ -1022,6 +1031,7 @@ mod tests {
             status_bar: StatusBarWidget::new("test".to_string(), "main".to_string()),
             overlay: None,
             viewport_height: 24,
+            message_area_height: 19, // 24 - status(1) - input(3) - separator(1)
             command_popup: CommandPopup::new(),
             clarification: ClarificationWidget::new(),
             clear_after_welcome: false,

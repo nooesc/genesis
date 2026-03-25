@@ -24,6 +24,7 @@ expression: buffer_to_string(&buf)
   Ctrl+Right      Move cursor to next word                  
   Home/Ctrl+A     Move cursor to start of line              
   End/Ctrl+E      Move cursor to end of line                
+  Ctrl+B/F        Move cursor left/right (Emacs)            
   Ctrl+K          Delete to end of line (fill kill buffer)  
   Ctrl+U          Delete to start of line (fill kill buffer)
   Ctrl+W          Delete word backward (fill kill buffer)   
@@ -55,5 +56,4 @@ expression: buffer_to_string(&buf)
   ─────────────────                                         
   j / Down        Scroll down one line                      
   k / Up          Scroll up one line                        
-  Ctrl+D          Scroll down half page                     
-  Ctrl+U          Scroll up half page
+  Ctrl+D          Scroll down half page

@@ -239,6 +239,7 @@ pub async fn run_tui(
         status_bar,
         overlay: None,
         viewport_height: viewport_area.height,
+        message_area_height: viewport_area.height.saturating_sub(5), // status + input + separator
         command_popup: crate::widgets::command_popup::CommandPopup::new(),
         clarification: crate::widgets::clarification::ClarificationWidget::new(),
         clear_after_welcome: false,
@@ -672,13 +673,17 @@ fn render_frame(
         let area = term.viewport_area();
         app.viewport_width = area.width;
         app.viewport_height = area.height;
+        // Approximate the new message area height (status + input + separator ≈ 5 rows).
+        // The exact value is computed during render, but this estimate is sufficient
+        // for scroll clamping on resize.
+        app.message_area_height = area.height.saturating_sub(5);
 
         // Cancel all running effects — they hold stale coordinates from
         // the pre-resize viewport.
         app.effects.on_resize();
 
-        // Reclamp scroll offset for the new width.
-        app.chat.reclamp_scroll(area.width);
+        // Reclamp scroll offset for the new dimensions.
+        app.chat.reclamp_scroll(area.width, app.message_area_height);
 
         // Rebuild the transcript overlay if open.
         if let Some(app::ActiveOverlay::Transcript(_)) = &app.overlay {
@@ -794,6 +799,9 @@ fn render_frame(
                     height: chat_area_height,
                 };
 
+                // Store computed message area height for scroll clamping.
+                app.message_area_height = message_area_height;
+
                 if message_area_height > 0 {
                     app.chat.render_messages(message_area, buf);
 
@@ -836,8 +844,14 @@ fn render_frame(
                 }
 
                 if input_area.height >= 2 && input_area.width >= 2 {
-                    // Input panel border.
-                    let border_style = Style::default().fg(app.active_theme.border());
+                    // Input panel border — accent when idle (accepting input),
+                    // dim when a turn is running.
+                    let border_color = if app.turn_running {
+                        app.active_theme.text_dim()
+                    } else {
+                        app.active_theme.border()
+                    };
+                    let border_style = Style::default().fg(border_color);
                     crate::render::draw_box(input_area, buf, border_style, None);
 
                     let inner = Rect {

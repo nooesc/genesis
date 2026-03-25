@@ -93,6 +93,7 @@ impl HelpOverlay {
             ("Ctrl+Right", "Move cursor to next word"),
             ("Home/Ctrl+A", "Move cursor to start of line"),
             ("End/Ctrl+E", "Move cursor to end of line"),
+            ("Ctrl+B/F", "Move cursor left/right (Emacs)"),
             ("Ctrl+K", "Delete to end of line (fill kill buffer)"),
             ("Ctrl+U", "Delete to start of line (fill kill buffer)"),
             ("Ctrl+W", "Delete word backward (fill kill buffer)"),

@@ -161,15 +161,36 @@ impl CommandPopup {
     }
 
     /// Recompute `filtered` and clamp `selected`.
+    ///
+    /// Uses subsequence (fuzzy) matching: query characters must appear in
+    /// order but need not be contiguous. Exact prefix matches sort first,
+    /// then substring matches, then fuzzy matches.
     fn refilter(&mut self) {
         let q = self.query.to_lowercase();
-        self.filtered = self
-            .commands
-            .iter()
-            .enumerate()
-            .filter(|(_, cmd)| cmd.name.to_lowercase().contains(&q))
-            .map(|(i, _)| i)
-            .collect();
+        if q.is_empty() {
+            self.filtered = (0..self.commands.len()).collect();
+        } else {
+            // Score: 0 = prefix, 1 = substring, 2 = fuzzy subsequence
+            let mut scored: Vec<(usize, u8)> = self
+                .commands
+                .iter()
+                .enumerate()
+                .filter_map(|(i, cmd)| {
+                    let name = cmd.name.to_lowercase();
+                    if name.starts_with(&q) {
+                        Some((i, 0))
+                    } else if name.contains(&q) {
+                        Some((i, 1))
+                    } else if fuzzy_subsequence(&name, &q) {
+                        Some((i, 2))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            scored.sort_by_key(|&(_, score)| score);
+            self.filtered = scored.into_iter().map(|(i, _)| i).collect();
+        }
         // Clamp selection so it stays in bounds.
         if self.filtered.is_empty() {
             self.selected = 0;
@@ -424,6 +445,17 @@ fn truncate_str(s: &str, max_chars: usize) -> String {
         let truncated: String = s.chars().take(max_chars - 1).collect();
         format!("{}…", truncated)
     }
+}
+
+/// Check whether `query` is a subsequence of `haystack` (all chars appear in order).
+fn fuzzy_subsequence(haystack: &str, query: &str) -> bool {
+    let mut haystack_chars = haystack.chars();
+    for qc in query.chars() {
+        if !haystack_chars.any(|hc| hc == qc) {
+            return false;
+        }
+    }
+    true
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
