@@ -1,8 +1,8 @@
-import type { AuditEntry, HealthResponse, InsightsData, Schedule, SessionSummary } from '@/lib/api/types'
+import type { AuditEntry, HealthResponse, InsightsData, Schedule, SessionSummary, Skill } from '@/lib/api/types'
 
-export type CommandMapNodeKind = 'eve' | 'thread' | 'trigger' | 'system' | 'alert'
+export type CommandMapNodeKind = 'eve' | 'thread' | 'trigger' | 'recipe' | 'system' | 'alert'
 
-export type CommandMapNodeLayer = 'core' | 'execution' | 'trigger' | 'system' | 'alert'
+export type CommandMapNodeLayer = 'core' | 'execution' | 'trigger' | 'recipe' | 'system' | 'alert'
 
 export type CommandMapNodeStatus = 'ok' | 'warning' | 'error' | 'idle'
 
@@ -41,6 +41,7 @@ export interface CommandMapProjectionInput {
   health: HealthResponse | null
   sessions: readonly SessionSummary[]
   schedules: readonly Schedule[]
+  skills: readonly Skill[]
   audit: readonly AuditEntry[]
   insights: InsightsData | null
 }

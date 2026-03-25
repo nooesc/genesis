@@ -9,6 +9,7 @@ import { useInsights } from '@/lib/api/queries/analytics'
 import { useAuditLog } from '@/lib/api/queries/audit'
 import { useSchedules } from '@/lib/api/queries/schedules'
 import { useSessions } from '@/lib/api/queries/sessions'
+import { useSkills } from '@/lib/api/queries/skills'
 import { buildCommandMapModel } from '@/lib/command-map/selectors'
 import { buildCommandMapJumpTarget, buildCommandMapSearchIndex } from '@/lib/command-map/search'
 import type { CommandMapProjectionInput } from '@/lib/command-map/types'
@@ -113,6 +114,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
   const { data: insights } = useInsights(7, { enabled: open, refetchInterval: 60_000 })
   const { data: sessions } = useSessions({ limit: 20 }, { enabled: open })
   const { data: schedules } = useSchedules({ enabled: open })
+  const { data: skills } = useSkills({ enabled: open })
   const { data: audit = [] } = useAuditLog({ limit: 24 }, { enabled: open, refetchInterval: 30_000 })
 
   const close = () => onOpenChange(false)
@@ -124,12 +126,13 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
       health: health ?? null,
       sessions: sessions ?? [],
       schedules: schedules ?? [],
+      skills: skills ?? [],
       audit,
       insights: insights ?? null,
     }
 
     return buildCommandMapSearchIndex(buildCommandMapModel(input))
-  }, [audit, health, insights, open, schedules, sessions])
+  }, [audit, health, insights, open, schedules, sessions, skills])
 
   return (
     <CommandDialog open={open} onOpenChange={onOpenChange}>

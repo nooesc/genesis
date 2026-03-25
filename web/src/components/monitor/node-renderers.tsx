@@ -21,6 +21,7 @@ function commandMapNodeTone(node: CommandMapNode): string {
     if (node.status === 'warning') return 'border-amber-400/40 bg-amber-400/10 text-amber-100'
     return 'border-emerald-400/40 bg-emerald-400/10 text-emerald-100'
   }
+  if (node.kind === 'recipe') return 'border-sky-400/40 bg-sky-400/10 text-sky-100'
   if (node.kind === 'alert') return 'border-red-400/40 bg-red-400/10 text-red-100'
   if (node.kind === 'trigger') return 'border-amber-400/40 bg-amber-400/10 text-amber-100'
   return 'border-border/30 bg-card/60 text-foreground/90'

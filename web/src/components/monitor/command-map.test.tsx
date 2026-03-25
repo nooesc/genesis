@@ -104,6 +104,17 @@ const model: CommandMapModel = {
       data: { schedule_id: 'nightly', enabled: true, prompt: 'Run nightly', last_run_at: null },
     },
     {
+      id: 'skill-deploy-service',
+      kind: 'recipe',
+      layer: 'recipe',
+      ring: 2,
+      label: 'deploy-service',
+      subtitle: 'Run the standard deployment recipe',
+      status: 'ok',
+      position: { x: 24, y: 34 },
+      data: { skill_name: 'deploy-service', tag_count: 2 },
+    },
+    {
       id: 'system-model',
       kind: 'system',
       layer: 'system',
@@ -140,15 +151,19 @@ describe('CommandMap', () => {
 
     expect(await screen.findByRole('button', { name: /^Eve(?:\s|$)/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Execution/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Recipes/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Triggers/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Declutter/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Focus/i })).toBeInTheDocument()
     expect(screen.getByText(/select a node to inspect/i)).toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('button', { name: /Declutter/i }))
-    expect(screen.queryByRole('button', { name: /Model/i })).not.toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: /^deploy-service(?:\s|$)/i })).toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('button', { name: /Declutter/i }))
-    expect(await screen.findByRole('button', { name: /^Model(?:\s|$)/i })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Recipes/i }))
+    expect(screen.queryByRole('button', { name: /^deploy-service(?:\s|$)/i })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^nightly(?:\s|$)/i })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Recipes/i }))
+    expect(await screen.findByRole('button', { name: /^deploy-service(?:\s|$)/i })).toBeInTheDocument()
 
     fireEvent.click(await screen.findByRole('button', { name: /^Alpha(?:\s|$)/i }))
     fireEvent.click(screen.getByRole('button', { name: /Focus/i }))

@@ -5,6 +5,7 @@ import type { CommandMapNodeLayer } from '@/lib/command-map/types'
 const layers: { key: CommandMapNodeLayer; label: string }[] = [
   { key: 'core', label: 'Core' },
   { key: 'execution', label: 'Execution' },
+  { key: 'recipe', label: 'Recipes' },
   { key: 'trigger', label: 'Triggers' },
   { key: 'system', label: 'Systems' },
   { key: 'alert', label: 'Alerts' },

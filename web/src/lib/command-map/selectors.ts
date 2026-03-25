@@ -1,8 +1,9 @@
 import type { CommandMapEdge, CommandMapModel, CommandMapNode, CommandMapProjectionInput } from './types'
-import { COMMAND_MAP_RINGS, applyCommandMapLayout, ringLayer } from './layout'
+import { COMMAND_MAP_RINGS, applyCommandMapLayout } from './layout'
 
-function sortByTimeThenId<T extends { id: string; created_at?: string; updated_at?: string }>(
+function sortByTimeThenKey<T extends { created_at?: string; updated_at?: string }>(
   items: readonly T[],
+  getKey: (item: T) => string,
 ): T[] {
   return [...items].sort((a, b) => {
     const aTime = Date.parse(a.updated_at ?? a.created_at ?? '')
@@ -10,9 +11,24 @@ function sortByTimeThenId<T extends { id: string; created_at?: string; updated_a
     if (Number.isFinite(aTime) && Number.isFinite(bTime) && aTime !== bTime) {
       return bTime - aTime
     }
-    if (a.id !== b.id) return a.id.localeCompare(b.id)
+
+    const aKey = getKey(a)
+    const bKey = getKey(b)
+    if (aKey !== bKey) return aKey.localeCompare(bKey)
     return 0
   })
+}
+
+function sortByTimeThenId<T extends { id: string; created_at?: string; updated_at?: string }>(
+  items: readonly T[],
+): T[] {
+  return sortByTimeThenKey(items, item => item.id)
+}
+
+function sortByTimeThenName<T extends { name: string; created_at?: string; updated_at?: string }>(
+  items: readonly T[],
+): T[] {
+  return sortByTimeThenKey(items, item => item.name)
 }
 
 function formatStatus(status: string): 'ok' | 'warning' | 'error' {
@@ -35,17 +51,53 @@ function makeNodeId(prefix: string, id: string): string {
   return `${prefix}-${id}`
 }
 
+function buildNodeBase(
+  kind: CommandMapNode['kind'],
+  id: string,
+  label: string,
+  subtitle?: string,
+  status?: CommandMapNode['status'],
+): Omit<CommandMapNode, 'data'> {
+  const layer: CommandMapNode['layer'] = kind === 'eve'
+    ? 'core'
+    : kind === 'thread'
+      ? 'execution'
+      : kind === 'trigger'
+        ? 'trigger'
+        : kind === 'recipe'
+          ? 'recipe'
+          : kind === 'system'
+            ? 'system'
+            : 'alert'
+
+  const ring = kind === 'eve'
+    ? COMMAND_MAP_RINGS.core
+    : kind === 'thread'
+      ? COMMAND_MAP_RINGS.execution
+      : kind === 'trigger'
+        ? COMMAND_MAP_RINGS.trigger
+        : kind === 'recipe'
+          ? COMMAND_MAP_RINGS.recipe
+          : kind === 'system'
+            ? COMMAND_MAP_RINGS.system
+            : COMMAND_MAP_RINGS.alert
+
+  return {
+    id,
+    kind,
+    layer,
+    ring,
+    label,
+    subtitle,
+    status,
+    position: { x: 0, y: 0 },
+  }
+}
+
 export function buildEveNode(health: CommandMapProjectionInput['health']): CommandMapNode {
   if (!health) {
     return {
-      id: 'eve',
-      kind: 'eve',
-      layer: ringLayer(COMMAND_MAP_RINGS.core),
-      ring: COMMAND_MAP_RINGS.core,
-      label: 'Eve',
-      subtitle: 'offline · gateway unavailable',
-      status: 'error',
-      position: { x: 0, y: 0 },
+      ...buildNodeBase('eve', 'eve', 'Eve', 'offline · gateway unavailable', 'error'),
       data: {
         model: null,
         uptime_seconds: null,
@@ -58,14 +110,7 @@ export function buildEveNode(health: CommandMapProjectionInput['health']): Comma
   }
 
   return {
-    id: 'eve',
-    kind: 'eve',
-    layer: ringLayer(COMMAND_MAP_RINGS.core),
-    ring: COMMAND_MAP_RINGS.core,
-    label: 'Eve',
-    subtitle: `${health.status} · ${health.version}`,
-    status: formatStatus(health.status),
-    position: { x: 0, y: 0 },
+    ...buildNodeBase('eve', 'eve', 'Eve', `${health.status} · ${health.version}`, formatStatus(health.status)),
     data: {
       model: health.model,
       uptime_seconds: health.uptime_seconds,
@@ -79,14 +124,13 @@ export function buildEveNode(health: CommandMapProjectionInput['health']): Comma
 
 export function buildSessionNodes(input: CommandMapProjectionInput): CommandMapNode[] {
   return sortByTimeThenId(input.sessions).map((session, index) => ({
-    id: makeNodeId('session', session.id),
-    kind: 'thread',
-    layer: ringLayer(COMMAND_MAP_RINGS.execution),
-    ring: COMMAND_MAP_RINGS.execution,
-    label: session.title?.trim() || session.id,
-    subtitle: [session.platform, `${session.total_input_tokens + session.total_output_tokens} tok`].join(' · '),
-    status: session.updated_at ? 'ok' : 'idle',
-    position: { x: 0, y: 0 },
+    ...buildNodeBase(
+      'thread',
+      makeNodeId('session', session.id),
+      session.title?.trim() || session.id,
+      [session.platform, `${session.total_input_tokens + session.total_output_tokens} tok`].join(' · '),
+      session.updated_at ? 'ok' : 'idle',
+    ),
     data: {
       session_id: session.id,
       platform: session.platform,
@@ -99,14 +143,13 @@ export function buildSessionNodes(input: CommandMapProjectionInput): CommandMapN
 
 export function buildScheduleNodes(input: CommandMapProjectionInput): CommandMapNode[] {
   return sortByTimeThenId(input.schedules).map(schedule => ({
-    id: makeNodeId('schedule', schedule.id),
-    kind: 'trigger',
-    layer: ringLayer(COMMAND_MAP_RINGS.trigger),
-    ring: COMMAND_MAP_RINGS.trigger,
-    label: schedule.id,
-    subtitle: `${schedule.cron_expression} · ${schedule.destination}`,
-    status: schedule.enabled ? 'ok' : 'idle',
-    position: { x: 0, y: 0 },
+    ...buildNodeBase(
+      'trigger',
+      makeNodeId('schedule', schedule.id),
+      schedule.id,
+      `${schedule.cron_expression} · ${schedule.destination}`,
+      schedule.enabled ? 'ok' : 'idle',
+    ),
     data: {
       schedule_id: schedule.id,
       enabled: schedule.enabled,
@@ -116,33 +159,49 @@ export function buildScheduleNodes(input: CommandMapProjectionInput): CommandMap
   }))
 }
 
+export function buildRecipeNodes(input: CommandMapProjectionInput): CommandMapNode[] {
+  return sortByTimeThenName(input.skills).map(skill => {
+    const subtitleParts = [
+      skill.description.trim() || null,
+      skill.tags.length > 0 ? skill.tags.join(', ') : null,
+    ].filter(Boolean)
+
+    return {
+      ...buildNodeBase(
+        'recipe',
+        makeNodeId('skill', skill.name),
+        skill.name,
+        subtitleParts.join(' · ') || 'saved recipe',
+        skill.content.trim().length > 0 || skill.description.trim().length > 0 ? 'ok' : 'idle',
+      ),
+      data: {
+        skill_name: skill.name,
+        tag_count: skill.tags.length,
+        content_length: skill.content.length,
+      },
+    }
+  })
+}
+
 export function buildSystemNodes(input: CommandMapProjectionInput): CommandMapNode[] {
   const nodes: CommandMapNode[] = []
 
   if (input.health) {
     nodes.push(
       {
-        id: makeNodeId('system', 'model'),
-        kind: 'system',
-        layer: ringLayer(COMMAND_MAP_RINGS.system),
-        ring: COMMAND_MAP_RINGS.system,
-        label: 'Model',
-        subtitle: input.health.model,
-        status: 'ok',
-        position: { x: 0, y: 0 },
+        ...buildNodeBase('system', makeNodeId('system', 'model'), 'Model', input.health.model, 'ok'),
         data: {
           model: input.health.model,
         },
       },
       {
-        id: makeNodeId('system', 'mcp'),
-        kind: 'system',
-        layer: ringLayer(COMMAND_MAP_RINGS.system),
-        ring: COMMAND_MAP_RINGS.system,
-        label: 'MCP',
-        subtitle: `${input.health.mcp_servers} servers`,
-        status: input.health.mcp_servers > 0 ? 'ok' : 'warning',
-        position: { x: 0, y: 0 },
+        ...buildNodeBase(
+          'system',
+          makeNodeId('system', 'mcp'),
+          'MCP',
+          `${input.health.mcp_servers} servers`,
+          input.health.mcp_servers > 0 ? 'ok' : 'warning',
+        ),
         data: {
           mcp_servers: input.health.mcp_servers,
         },
@@ -153,14 +212,13 @@ export function buildSystemNodes(input: CommandMapProjectionInput): CommandMapNo
   if (input.insights) {
     for (const [platform, count] of input.insights.platform_breakdown) {
       nodes.push({
-        id: makeNodeId('platform', platform),
-        kind: 'system',
-        layer: ringLayer(COMMAND_MAP_RINGS.system),
-        ring: COMMAND_MAP_RINGS.system,
-        label: platform,
-        subtitle: `${count} sessions`,
-        status: count > 0 ? 'ok' : 'idle',
-        position: { x: 0, y: 0 },
+        ...buildNodeBase(
+          'system',
+          makeNodeId('platform', platform),
+          platform,
+          `${count} sessions`,
+          count > 0 ? 'ok' : 'idle',
+        ),
         data: {
           platform,
           count,
@@ -199,14 +257,13 @@ export function buildAlertNodes(input: CommandMapProjectionInput): CommandMapNod
       ].filter(Boolean)
 
       return {
-        id: makeNodeId('alert', entry.id),
-        kind: 'alert',
-        layer: ringLayer(COMMAND_MAP_RINGS.alert),
-        ring: COMMAND_MAP_RINGS.alert,
-        label: entry.event_type,
-        subtitle: subtitleParts.join(' · ') || entry.created_at,
-        status: 'error',
-        position: { x: 0, y: 0 },
+        ...buildNodeBase(
+          'alert',
+          makeNodeId('alert', entry.id),
+          entry.event_type,
+          subtitleParts.join(' · ') || entry.created_at,
+          'error',
+        ),
         data: {
           event_type: entry.event_type,
           session_id: entry.session_id,
@@ -221,6 +278,7 @@ export function buildCommandMapModel(input: CommandMapProjectionInput): CommandM
     buildEveNode(input.health),
     ...buildSessionNodes(input),
     ...buildScheduleNodes(input),
+    ...buildRecipeNodes(input),
     ...buildSystemNodes(input),
     ...buildAlertNodes(input),
   ])

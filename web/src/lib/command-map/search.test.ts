@@ -39,6 +39,16 @@ const model: CommandMapModel = {
       position: { x: 20, y: 30 },
     },
     {
+      id: 'skill-deploy-service',
+      kind: 'recipe',
+      layer: 'recipe',
+      ring: 2,
+      label: 'deploy-service',
+      subtitle: 'Run the standard deployment recipe',
+      status: 'ok',
+      position: { x: 25, y: 35 },
+    },
+    {
       id: 'alert-a1',
       kind: 'alert',
       layer: 'alert',
@@ -72,6 +82,17 @@ describe('command map search', () => {
     })
 
     expect(filtered.map(entry => entry.nodeId)).toEqual(['session-s1'])
+  })
+
+  it('can filter recipe results distinctly from triggers', () => {
+    const index = buildCommandMapSearchIndex(model)
+    const filtered = filterCommandMapSearchIndex(index, {
+      query: 'deployment',
+      layer: 'recipe',
+      kind: 'recipe',
+    })
+
+    expect(filtered.map(entry => entry.nodeId)).toEqual(['skill-deploy-service'])
   })
 
   it('builds a monitor jump target for a selected node', () => {

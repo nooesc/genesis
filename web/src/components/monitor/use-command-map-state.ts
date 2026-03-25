@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { CommandMapNode, CommandMapNodeLayer } from '@/lib/command-map/types'
 
-const DEFAULT_LAYERS: CommandMapNodeLayer[] = ['core', 'execution', 'trigger', 'system', 'alert']
+const DEFAULT_LAYERS: CommandMapNodeLayer[] = ['core', 'execution', 'recipe', 'trigger', 'system', 'alert']
 
 interface UseCommandMapStateOptions {
   focusNodeId?: string | null
@@ -15,6 +15,7 @@ export function useCommandMapState(nodes: CommandMapNode[], options: UseCommandM
   const [visibleLayers, setVisibleLayers] = useState<Record<CommandMapNodeLayer, boolean>>({
     core: true,
     execution: true,
+    recipe: true,
     trigger: true,
     system: true,
     alert: true,

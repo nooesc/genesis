@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { buildCommandMapModel } from './selectors'
 import { COMMAND_MAP_RINGS } from './layout'
+import type { CommandMapProjectionInput } from './types'
 
 describe('buildCommandMapModel', () => {
-  const baseInput = {
+  const baseInput: CommandMapProjectionInput = {
     health: {
       status: 'ok',
       version: '1.0.0',
@@ -22,6 +23,16 @@ describe('buildCommandMapModel', () => {
         total_input_tokens: 10,
         total_output_tokens: 5,
         parent_session_id: null,
+        created_at: '2026-03-24T00:00:00Z',
+        updated_at: '2026-03-24T00:00:00Z',
+      },
+    ],
+    skills: [
+      {
+        name: 'deploy-service',
+        description: 'Run the standard deployment recipe',
+        content: 'Deploy the service with the approved steps.',
+        tags: ['ops', 'release'],
         created_at: '2026-03-24T00:00:00Z',
         updated_at: '2026-03-24T00:00:00Z',
       },
@@ -66,6 +77,15 @@ describe('buildCommandMapModel', () => {
     expect(trigger).toBeDefined()
     expect(trigger?.kind).toBe('trigger')
     expect(trigger?.ring).toBe(COMMAND_MAP_RINGS.trigger)
+  })
+
+  it('derives recipe nodes from skills', () => {
+    const model = buildCommandMapModel(baseInput)
+
+    const recipe = model.nodes.find(node => node.id === 'skill-deploy-service')
+    expect(recipe).toBeDefined()
+    expect(recipe?.kind).toBe('recipe')
+    expect(recipe?.ring).toBe(COMMAND_MAP_RINGS.recipe)
   })
 
   it('derives alert nodes from failed or degraded audit entries', () => {

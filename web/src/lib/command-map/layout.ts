@@ -4,6 +4,7 @@ export const COMMAND_MAP_RINGS = {
   core: 0,
   execution: 1,
   trigger: 2,
+  recipe: 2,
   system: 3,
   alert: 4,
 } as const
@@ -33,8 +34,18 @@ export function ringLayer(ring: number): CommandMapNodeLayer {
 }
 
 export function orderForLayout(nodes: CommandMapNode[]): CommandMapNode[] {
+  const layerOrder: Record<CommandMapNodeLayer, number> = {
+    core: 0,
+    execution: 1,
+    trigger: 2,
+    recipe: 3,
+    system: 4,
+    alert: 5,
+  }
+
   return [...nodes].sort((a, b) => {
     if (a.ring !== b.ring) return a.ring - b.ring
+    if (a.layer !== b.layer) return layerOrder[a.layer] - layerOrder[b.layer]
     const labelCompare = a.label.localeCompare(b.label)
     if (labelCompare !== 0) return labelCompare
     return a.id.localeCompare(b.id)
