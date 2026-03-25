@@ -9,6 +9,21 @@ use tracing::{debug, info, info_span, warn};
 use super::{AgentError, SubagentSpawner};
 use crate::ToolRuntime;
 
+/// Check whether a tool result string represents an error.
+///
+/// This is the single source of truth for the `"Error:"` convention used
+/// throughout the agent loop, trajectory scorer, and auto-tagger.
+/// Case-insensitive to handle tools that return `"error:"` lowercase.
+pub(crate) fn is_tool_error(content: &str) -> bool {
+    content.starts_with("Error:") || content.starts_with("error:")
+}
+
+/// Check whether a `find_tools` result indicates no matches.
+/// Used to avoid treating empty results as successful discovery.
+pub(crate) fn is_find_tools_empty(content: &str) -> bool {
+    content.starts_with("No tools")
+}
+
 /// Produce a short summary string (max ~40 chars) from a tool call's JSON
 /// arguments. Tries to show the first key-value pair; falls back to truncating
 /// the raw string.
