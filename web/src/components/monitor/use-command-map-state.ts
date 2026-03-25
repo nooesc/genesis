@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { CommandMapNode, CommandMapNodeLayer } from '@/lib/command-map/types'
 
 const DEFAULT_LAYERS: CommandMapNodeLayer[] = ['core', 'execution', 'trigger', 'system', 'alert']
@@ -26,7 +26,37 @@ export function useCommandMapState(nodes: CommandMapNode[]) {
     setIsDecluttered(current => !current)
   }
 
+  const layerVisibleNodes = useMemo(
+    () => nodes.filter(node => visibleLayers[node.layer]),
+    [nodes, visibleLayers],
+  )
+
+  const visibleNodes = useMemo(
+    () => layerVisibleNodes.filter(node => {
+      if (!isDecluttered) return true
+      if (node.id === selectedNodeId) return true
+      return node.kind === 'eve' || node.kind === 'thread' || node.kind === 'trigger'
+    }),
+    [isDecluttered, layerVisibleNodes, selectedNodeId],
+  )
+
+  const selectedNode = visibleNodes.find(node => node.id === selectedNodeId) ?? null
+
+  useEffect(() => {
+    if (!selectedNodeId) {
+      if (isFocused) setIsFocused(false)
+      return
+    }
+
+    const selectionStillVisible = layerVisibleNodes.some(node => node.id === selectedNodeId)
+    if (!selectionStillVisible) {
+      setSelectedNodeId(null)
+      setIsFocused(false)
+    }
+  }, [isFocused, layerVisibleNodes, selectedNodeId])
+
   function toggleFocus() {
+    if (!selectedNode) return
     setIsFocused(current => !current)
   }
 
@@ -44,14 +74,6 @@ export function useCommandMapState(nodes: CommandMapNode[]) {
       ),
     )
   }
-
-  const selectedNode = nodes.find(node => node.id === selectedNodeId) ?? null
-  const visibleNodes = nodes.filter(node => {
-    if (!visibleLayers[node.layer]) return false
-    if (!isDecluttered) return true
-    if (node.id === selectedNodeId) return true
-    return node.kind === 'eve' || node.kind === 'thread' || node.kind === 'trigger'
-  })
 
   return {
     selectedNodeId,

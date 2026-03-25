@@ -103,4 +103,16 @@ describe('buildCommandMapModel', () => {
 
     expect(secondRings).toEqual(firstRings)
   })
+
+  it('projects a degraded Eve node when health is unavailable', () => {
+    const model = buildCommandMapModel({
+      ...baseInput,
+      health: null,
+    })
+
+    const eve = model.nodes.find(node => node.id === 'eve')
+    expect(eve).toBeDefined()
+    expect(eve?.status).toBe('error')
+    expect(eve?.subtitle).toMatch(/offline/i)
+  })
 })

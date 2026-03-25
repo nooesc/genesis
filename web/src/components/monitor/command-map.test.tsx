@@ -53,6 +53,18 @@ const model: CommandMapModel = {
   edges: [],
 }
 
+const offlineModel: CommandMapModel = {
+  nodes: [
+    {
+      ...model.nodes[0],
+      subtitle: 'offline · gateway unavailable',
+      status: 'error',
+      data: { model: null },
+    },
+  ],
+  edges: [],
+}
+
 describe('CommandMap', () => {
   it('renders Eve, layer toggles, and inspector state', () => {
     render(<CommandMap model={model} />)
@@ -75,5 +87,31 @@ describe('CommandMap', () => {
     expect(screen.getByRole('heading', { name: /Alpha/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Focus/i })).toHaveAttribute('aria-pressed', 'true')
     expect(screen.getByText(/session-s1/i)).toBeInTheDocument()
+  })
+
+  it('clears selection and focus when the selected layer is hidden', () => {
+    render(<CommandMap model={model} />)
+
+    fireEvent.click(screen.getByRole('button', { name: /Alpha/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Focus/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Execution/i }))
+
+    expect(screen.getByText(/select a node to inspect/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Focus/i })).toHaveAttribute('aria-pressed', 'false')
+    expect(screen.queryByRole('button', { name: /Alpha/i })).not.toBeInTheDocument()
+  })
+
+  it('does not render a dead search control', () => {
+    render(<CommandMap model={model} />)
+
+    expect(screen.queryByRole('button', { name: /Search/i })).not.toBeInTheDocument()
+  })
+
+  it('renders offline Eve with an error tone', () => {
+    render(<CommandMap model={offlineModel} />)
+
+    const eve = screen.getByRole('button', { name: /Eve/i })
+    expect(eve).toHaveTextContent(/offline · gateway unavailable/i)
+    expect(eve.className).toContain('border-red-400/40')
   })
 })

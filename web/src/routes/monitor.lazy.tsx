@@ -22,10 +22,8 @@ function MonitorPage() {
   const { data: audit = [], isLoading: auditLoading } = useAuditLog({ limit: 24 }, { refetchInterval: 30_000 })
 
   const model = useMemo(() => {
-    if (!health) return null
-
     const input: CommandMapProjectionInput = {
-      health,
+      health: health ?? null,
       sessions: sessions ?? [],
       schedules: schedules ?? [],
       audit,
@@ -37,7 +35,7 @@ function MonitorPage() {
 
   const isLoading = healthLoading || insightsLoading || sessionsLoading || schedulesLoading || auditLoading
 
-  if (isLoading || !model) {
+  if (isLoading) {
     return (
       <div className="flex flex-col gap-4">
         <Skeleton className="h-10 w-64 rounded" />

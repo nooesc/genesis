@@ -38,7 +38,7 @@ export interface CommandMapModel {
 }
 
 export interface CommandMapProjectionInput {
-  health: HealthResponse
+  health: HealthResponse | null
   sessions: readonly SessionSummary[]
   schedules: readonly Schedule[]
   audit: readonly AuditEntry[]

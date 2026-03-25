@@ -36,6 +36,27 @@ function makeNodeId(prefix: string, id: string): string {
 }
 
 export function buildEveNode(health: CommandMapProjectionInput['health']): CommandMapNode {
+  if (!health) {
+    return {
+      id: 'eve',
+      kind: 'eve',
+      layer: ringLayer(COMMAND_MAP_RINGS.core),
+      ring: COMMAND_MAP_RINGS.core,
+      label: 'Eve',
+      subtitle: 'offline · gateway unavailable',
+      status: 'error',
+      position: { x: 0, y: 0 },
+      data: {
+        model: null,
+        uptime_seconds: null,
+        mcp_servers: null,
+        active_schedules: null,
+        total_sessions: null,
+        total_tools: null,
+      },
+    }
+  }
+
   return {
     id: 'eve',
     kind: 'eve',
@@ -96,34 +117,38 @@ export function buildScheduleNodes(input: CommandMapProjectionInput): CommandMap
 }
 
 export function buildSystemNodes(input: CommandMapProjectionInput): CommandMapNode[] {
-  const nodes: CommandMapNode[] = [
-    {
-      id: makeNodeId('system', 'model'),
-      kind: 'system',
-      layer: ringLayer(COMMAND_MAP_RINGS.system),
-      ring: COMMAND_MAP_RINGS.system,
-      label: 'Model',
-      subtitle: input.health.model,
-      status: 'ok',
-      position: { x: 0, y: 0 },
-      data: {
-        model: input.health.model,
+  const nodes: CommandMapNode[] = []
+
+  if (input.health) {
+    nodes.push(
+      {
+        id: makeNodeId('system', 'model'),
+        kind: 'system',
+        layer: ringLayer(COMMAND_MAP_RINGS.system),
+        ring: COMMAND_MAP_RINGS.system,
+        label: 'Model',
+        subtitle: input.health.model,
+        status: 'ok',
+        position: { x: 0, y: 0 },
+        data: {
+          model: input.health.model,
+        },
       },
-    },
-    {
-      id: makeNodeId('system', 'mcp'),
-      kind: 'system',
-      layer: ringLayer(COMMAND_MAP_RINGS.system),
-      ring: COMMAND_MAP_RINGS.system,
-      label: 'MCP',
-      subtitle: `${input.health.mcp_servers} servers`,
-      status: input.health.mcp_servers > 0 ? 'ok' : 'warning',
-      position: { x: 0, y: 0 },
-      data: {
-        mcp_servers: input.health.mcp_servers,
+      {
+        id: makeNodeId('system', 'mcp'),
+        kind: 'system',
+        layer: ringLayer(COMMAND_MAP_RINGS.system),
+        ring: COMMAND_MAP_RINGS.system,
+        label: 'MCP',
+        subtitle: `${input.health.mcp_servers} servers`,
+        status: input.health.mcp_servers > 0 ? 'ok' : 'warning',
+        position: { x: 0, y: 0 },
+        data: {
+          mcp_servers: input.health.mcp_servers,
+        },
       },
-    },
-  ]
+    )
+  }
 
   if (input.insights) {
     for (const [platform, count] of input.insights.platform_breakdown) {

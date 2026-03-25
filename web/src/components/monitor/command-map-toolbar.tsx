@@ -14,6 +14,7 @@ interface CommandMapToolbarProps {
   visibleLayers: Record<CommandMapNodeLayer, boolean>
   isDecluttered: boolean
   isFocused: boolean
+  canFocus: boolean
   onToggleLayer: (layer: CommandMapNodeLayer) => void
   onToggleDeclutter: () => void
   onToggleFocus: () => void
@@ -24,6 +25,7 @@ export function CommandMapToolbar({
   visibleLayers,
   isDecluttered,
   isFocused,
+  canFocus,
   onToggleLayer,
   onToggleDeclutter,
   onToggleFocus,
@@ -65,15 +67,13 @@ export function CommandMapToolbar({
           size="sm"
           onClick={onToggleFocus}
           aria-pressed={isFocused}
+          disabled={!canFocus}
           className="font-mono text-[11px] uppercase tracking-[0.18em]"
         >
           Focus
         </Button>
         <Button type="button" variant="outline" size="sm" onClick={onReset} className="font-mono text-[11px] uppercase tracking-[0.18em]">
           Reset
-        </Button>
-        <Button type="button" variant="ghost" size="sm" className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted-foreground/70">
-          Search
         </Button>
       </div>
     </div>
