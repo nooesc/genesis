@@ -38,6 +38,17 @@ const model: CommandMapModel = {
       position: { x: 20, y: 30 },
       data: { schedule_id: 'nightly', enabled: true, prompt: 'Run nightly', last_run_at: null },
     },
+    {
+      id: 'system-model',
+      kind: 'system',
+      layer: 'system',
+      ring: 3,
+      label: 'Model',
+      subtitle: 'gpt-4.1',
+      status: 'ok',
+      position: { x: 30, y: 40 },
+      data: { model: 'gpt-4.1' },
+    },
   ],
   edges: [],
 }
@@ -48,11 +59,21 @@ describe('CommandMap', () => {
 
     expect(screen.getByRole('button', { name: /Eve/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Execution/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Declutter/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Focus/i })).toBeInTheDocument()
     expect(screen.getByText(/select a node to inspect/i)).toBeInTheDocument()
 
+    fireEvent.click(screen.getByRole('button', { name: /Declutter/i }))
+    expect(screen.queryByRole('button', { name: /Model/i })).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: /Declutter/i }))
+    expect(screen.getByRole('button', { name: /Model/i })).toBeInTheDocument()
+
     fireEvent.click(screen.getByRole('button', { name: /Alpha/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Focus/i }))
 
     expect(screen.getByRole('heading', { name: /Alpha/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Focus/i })).toHaveAttribute('aria-pressed', 'true')
     expect(screen.getByText(/session-s1/i)).toBeInTheDocument()
   })
 })

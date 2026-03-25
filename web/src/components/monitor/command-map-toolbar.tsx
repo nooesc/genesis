@@ -12,11 +12,23 @@ const layers: { key: CommandMapNodeLayer; label: string }[] = [
 
 interface CommandMapToolbarProps {
   visibleLayers: Record<CommandMapNodeLayer, boolean>
+  isDecluttered: boolean
+  isFocused: boolean
   onToggleLayer: (layer: CommandMapNodeLayer) => void
+  onToggleDeclutter: () => void
+  onToggleFocus: () => void
   onReset: () => void
 }
 
-export function CommandMapToolbar({ visibleLayers, onToggleLayer, onReset }: CommandMapToolbarProps) {
+export function CommandMapToolbar({
+  visibleLayers,
+  isDecluttered,
+  isFocused,
+  onToggleLayer,
+  onToggleDeclutter,
+  onToggleFocus,
+  onReset,
+}: CommandMapToolbarProps) {
   return (
     <div className="flex flex-wrap items-center gap-2 rounded-xl border border-border/20 bg-card/40 p-3">
       {layers.map(({ key, label }) => (
@@ -37,6 +49,26 @@ export function CommandMapToolbar({ visibleLayers, onToggleLayer, onReset }: Com
       ))}
 
       <div className="ml-auto flex items-center gap-2">
+        <Button
+          type="button"
+          variant={isDecluttered ? 'default' : 'outline'}
+          size="sm"
+          onClick={onToggleDeclutter}
+          aria-pressed={isDecluttered}
+          className="font-mono text-[11px] uppercase tracking-[0.18em]"
+        >
+          Declutter
+        </Button>
+        <Button
+          type="button"
+          variant={isFocused ? 'default' : 'outline'}
+          size="sm"
+          onClick={onToggleFocus}
+          aria-pressed={isFocused}
+          className="font-mono text-[11px] uppercase tracking-[0.18em]"
+        >
+          Focus
+        </Button>
         <Button type="button" variant="outline" size="sm" onClick={onReset} className="font-mono text-[11px] uppercase tracking-[0.18em]">
           Reset
         </Button>

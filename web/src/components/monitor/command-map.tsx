@@ -1,6 +1,7 @@
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { cn } from '@/lib/utils'
+import { useMemo } from 'react'
 import type { CommandMapModel, CommandMapNode } from '@/lib/command-map/types'
 import { CommandMapToolbar } from './command-map-toolbar'
 import { CommandMapInspector } from './command-map-inspector'
@@ -18,13 +19,44 @@ function nodeTone(node: CommandMapNode): string {
 }
 
 export function CommandMap({ model }: CommandMapProps) {
-  const { selectedNode, visibleLayers, visibleNodes, selectNode, toggleLayer, resetView } = useCommandMapState(model.nodes)
+  const {
+    selectedNode,
+    isDecluttered,
+    isFocused,
+    visibleLayers,
+    visibleNodes,
+    selectNode,
+    toggleLayer,
+    toggleDeclutter,
+    toggleFocus,
+    resetView,
+  } = useCommandMapState(model.nodes)
 
   const edges = model.edges.filter(edge => visibleNodes.some(node => node.id === edge.source) && visibleNodes.some(node => node.id === edge.target))
+  const connectedNodeIds = useMemo(() => {
+    if (!selectedNode || !isFocused) return new Set<string>()
+
+    const connected = new Set<string>([selectedNode.id])
+    for (const edge of edges) {
+      if (edge.source === selectedNode.id) connected.add(edge.target)
+      if (edge.target === selectedNode.id) connected.add(edge.source)
+    }
+
+    return connected
+  }, [edges, isFocused, selectedNode])
+  const displayedEdges = isFocused && selectedNode ? edges.filter(edge => edge.source === selectedNode.id || edge.target === selectedNode.id) : edges
 
   return (
     <div className="flex min-h-[calc(100vh-9rem)] flex-col gap-4">
-      <CommandMapToolbar visibleLayers={visibleLayers} onToggleLayer={toggleLayer} onReset={resetView} />
+      <CommandMapToolbar
+        visibleLayers={visibleLayers}
+        isDecluttered={isDecluttered}
+        isFocused={isFocused}
+        onToggleLayer={toggleLayer}
+        onToggleDeclutter={toggleDeclutter}
+        onToggleFocus={toggleFocus}
+        onReset={resetView}
+      />
 
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_20rem]">
         <Card className="min-h-[32rem]">
@@ -45,6 +77,7 @@ export function CommandMap({ model }: CommandMapProps) {
                     'h-auto min-h-24 flex-col items-start justify-start gap-1 rounded-xl border p-3 text-left font-mono',
                     nodeTone(node),
                     node.id === selectedNode?.id && 'ring-2 ring-primary/40',
+                    isFocused && selectedNode && !connectedNodeIds.has(node.id) && 'opacity-45',
                   )}
                   aria-pressed={node.id === selectedNode?.id}
                   aria-label={node.label}
@@ -60,9 +93,9 @@ export function CommandMap({ model }: CommandMapProps) {
 
             <div className="rounded-xl border border-border/20 bg-background/40 p-3 font-mono text-xs text-muted-foreground/60">
               <div className="mb-2 uppercase tracking-[0.2em] text-muted-foreground/50">Edges</div>
-              {edges.length > 0 ? (
+              {displayedEdges.length > 0 ? (
                 <ul className="space-y-1">
-                  {edges.map(edge => (
+                  {displayedEdges.map(edge => (
                     <li key={edge.id}>
                       {edge.source} → {edge.target}
                     </li>

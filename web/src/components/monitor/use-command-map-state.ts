@@ -5,6 +5,8 @@ const DEFAULT_LAYERS: CommandMapNodeLayer[] = ['core', 'execution', 'trigger', '
 
 export function useCommandMapState(nodes: CommandMapNode[]) {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
+  const [isDecluttered, setIsDecluttered] = useState(false)
+  const [isFocused, setIsFocused] = useState(false)
   const [visibleLayers, setVisibleLayers] = useState<Record<CommandMapNodeLayer, boolean>>({
     core: true,
     execution: true,
@@ -20,8 +22,18 @@ export function useCommandMapState(nodes: CommandMapNode[]) {
     }))
   }
 
+  function toggleDeclutter() {
+    setIsDecluttered(current => !current)
+  }
+
+  function toggleFocus() {
+    setIsFocused(current => !current)
+  }
+
   function resetView() {
     setSelectedNodeId(null)
+    setIsDecluttered(false)
+    setIsFocused(false)
     setVisibleLayers(
       DEFAULT_LAYERS.reduce(
         (acc, layer) => {
@@ -34,15 +46,24 @@ export function useCommandMapState(nodes: CommandMapNode[]) {
   }
 
   const selectedNode = nodes.find(node => node.id === selectedNodeId) ?? null
-  const visibleNodes = nodes.filter(node => visibleLayers[node.layer])
+  const visibleNodes = nodes.filter(node => {
+    if (!visibleLayers[node.layer]) return false
+    if (!isDecluttered) return true
+    if (node.id === selectedNodeId) return true
+    return node.kind === 'eve' || node.kind === 'thread' || node.kind === 'trigger'
+  })
 
   return {
     selectedNodeId,
     selectedNode,
+    isDecluttered,
+    isFocused,
     visibleLayers,
     visibleNodes,
     selectNode: setSelectedNodeId,
     toggleLayer,
+    toggleDeclutter,
+    toggleFocus,
     resetView,
   }
 }
