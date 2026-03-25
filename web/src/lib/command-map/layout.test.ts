@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { applyCommandMapLayout } from './layout'
+import { applyCommandMapLayout, COMMAND_MAP_RINGS, ringLayer } from './layout'
 import type { CommandMapNode } from './types'
 
 const baseNodes: CommandMapNode[] = [
@@ -42,6 +42,10 @@ const baseNodes: CommandMapNode[] = [
 ]
 
 describe('applyCommandMapLayout', () => {
+  it('maps the recipe ring to the recipe layer', () => {
+    expect(ringLayer(COMMAND_MAP_RINGS.recipe)).toBe('recipe')
+  })
+
   it('uses pinned positions instead of auto-layout positions', () => {
     const pinned = {
       'system-model': { x: 640, y: -120 },

@@ -20,7 +20,7 @@ const RING_RADII: Record<number, number> = {
 const RING_LAYERS: Record<number, CommandMapNodeLayer> = {
   [COMMAND_MAP_RINGS.core]: 'core',
   [COMMAND_MAP_RINGS.execution]: 'execution',
-  [COMMAND_MAP_RINGS.trigger]: 'trigger',
+  [COMMAND_MAP_RINGS.recipe]: 'recipe',
   [COMMAND_MAP_RINGS.system]: 'system',
   [COMMAND_MAP_RINGS.alert]: 'alert',
 }

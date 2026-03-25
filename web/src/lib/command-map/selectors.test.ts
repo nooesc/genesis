@@ -85,6 +85,7 @@ describe('buildCommandMapModel', () => {
     const recipe = model.nodes.find(node => node.id === 'skill-deploy-service')
     expect(recipe).toBeDefined()
     expect(recipe?.kind).toBe('recipe')
+    expect(recipe?.layer).toBe('recipe')
     expect(recipe?.ring).toBe(COMMAND_MAP_RINGS.recipe)
   })
 
