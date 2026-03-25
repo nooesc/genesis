@@ -983,87 +983,15 @@ impl AgentLoop {
                     };
                     let tool_elapsed_ms = tool_start.elapsed().as_millis() as u64;
 
-                    let mut executed_results = executed_results.into_iter();
-                    let mut clarification = None;
-                    for (tc, veto_reason) in
-                        effective_tool_calls.iter().zip(veto_reasons.into_iter())
-                    {
-                        let lua_vetoed = veto_reason.is_some();
-                        let (mut result, requires_input) = match veto_reason {
-                            Some(reason) => (
-                                format!("Error: tool call blocked by Lua hook: {reason}"),
-                                false,
-                            ),
-                            None => executed_results
-                                .next()
-                                .expect("executed tool results should align with allowed calls"),
-                        };
-                        result = sanitize::sanitize_credentials(&result);
-                        // When find_tools returns results and core set filtering is active,
-                        // extract discovered tool names and add them to the active set.
-                        if self.config.core_tools.is_some()
-                            && tc.function.name == "find_tools"
-                            && !result.starts_with("Error:")
-                            && !result.starts_with("No tools")
-                        {
-                            for line in result.lines() {
-                                let trimmed = line.trim();
-                                // find_tools output format: "  **tool_name** — description"
-                                if let Some(rest) = trimmed.strip_prefix("**") {
-                                    if let Some(name_end) = rest.find("**") {
-                                        self.discover_tool(&rest[..name_end]);
-                                    }
-                                }
-                            }
-                        }
-
-                        let success = !result.starts_with("Error:");
-                        if success && self.config.core_tools.is_some() {
-                            // Auto-discover tools called outside the core set.
-                            self.discover_tool(&tc.function.name);
-                        }
-                        let result = self.run_lua_post_tool_call(&tc.function.name, &result);
-                        if !success {
-                            let count = self
-                                .tool_failure_counts
-                                .entry(tc.function.name.clone())
-                                .or_insert(0);
-                            *count += 1;
-                        } else {
-                            self.tool_failure_counts.remove(&tc.function.name);
-                        }
-                        self.hooks.on_tool_call_end(
-                            &hook_session,
-                            &tc.function.name,
-                            success,
-                            tool_elapsed_ms,
-                        );
-                        self.fire_shell_hooks(
-                            HookEvent::PostToolCall,
-                            serde_json::json!({
-                                "session_id": hook_session,
-                                "tool_name": tc.function.name,
-                                "tool_call_id": tc.id,
-                                "success": success,
-                                "result": result,
-                                "requires_input": requires_input,
-                                "duration_ms": tool_elapsed_ms,
-                                "lua_vetoed": lua_vetoed,
-                            }),
-                        );
-                        let result = self
-                            .push_message_with_lua_hooks(
-                                &hook_session,
-                                ChatMessage::tool_result(&tc.id, result),
-                            )
-                            .and_then(|message| message.content_text().map(str::to_owned))
-                            .unwrap_or_default();
-                        self.trajectory
-                            .record_tool_result(&tc.function.name, &result);
-                        if requires_input {
-                            clarification = Some(result.clone());
-                        }
-                    }
+                    let clarification = self.process_tool_results(
+                        &hook_session,
+                        &effective_tool_calls,
+                        veto_reasons,
+                        executed_results,
+                        tool_elapsed_ms,
+                        false,
+                        |_| {},
+                    );
 
                     // Inject stuck-loop nudge if any tool failed too many times
                     self.maybe_inject_stuck_nudge();
