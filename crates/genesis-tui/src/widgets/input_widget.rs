@@ -324,8 +324,8 @@ impl InputWidget {
             }
 
             // ── Up/Down: line navigation when multi-line, history when single-line
-            // Ctrl+P — previous (Emacs)
-            (KeyCode::Char('p'), KeyModifiers::CONTROL) | (KeyCode::Up, _) => {
+            // (Ctrl+P/N are NOT aliased here — Ctrl+P is the command palette.)
+            (KeyCode::Up, _) => {
                 if self.is_multiline() {
                     self.move_cursor_up();
                 } else {
@@ -334,8 +334,7 @@ impl InputWidget {
                 InputAction::None
             }
 
-            // Ctrl+N — next (Emacs)
-            (KeyCode::Char('n'), KeyModifiers::CONTROL) | (KeyCode::Down, _) => {
+            (KeyCode::Down, _) => {
                 if self.is_multiline() {
                     self.move_cursor_down();
                 } else {

@@ -155,9 +155,15 @@ impl ChatWidget {
     /// The offset is clamped so the oldest content can reach the top of
     /// the viewport but never scrolls further (no blank screen). When
     /// total content fits within the viewport, returns 0.
+    ///
+    /// Accounts for hint rows: when scrolled, the renderer reserves 1 row
+    /// for "↑ N more" (top) and 1 row for "↓ scrolled up" (bottom), so
+    /// only `viewport_height - 2` rows show actual content.
     fn scroll_max(&mut self, viewport_width: u16, viewport_height: u16) -> usize {
         let total = self.committed_content_height(viewport_width);
-        total.saturating_sub(viewport_height as usize)
+        // Reserve 2 rows for hints when scrolled.
+        let visible = (viewport_height as usize).saturating_sub(2);
+        total.saturating_sub(visible)
     }
 
     /// Scroll the chat view up by `rows` rows, clamped so the oldest
