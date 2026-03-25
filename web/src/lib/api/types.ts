@@ -141,9 +141,11 @@ export interface AuditEntry {
   id: string
   event_type: string
   session_id: string | null
-  details: string | null
+  details: AuditEventDetails
   created_at: string
 }
+
+export type AuditEventDetails = string | null
 
 export interface ApprovedUser {
   platform: string
