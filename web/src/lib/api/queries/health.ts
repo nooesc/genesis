@@ -2,11 +2,16 @@ import { useQuery } from '@tanstack/react-query'
 import { api } from '../client'
 import type { HealthResponse, McpStatusResponse, CacheStatsResponse, WebhookStatusResponse } from '../types'
 
-export function useHealth() {
+interface QueryToggleOptions {
+  enabled?: boolean
+}
+
+export function useHealth(options?: QueryToggleOptions) {
   return useQuery({
     queryKey: ['health'],
     queryFn: () => api.get<HealthResponse>('/health'),
     refetchInterval: 5_000,
+    enabled: options?.enabled ?? true,
   })
 }
 

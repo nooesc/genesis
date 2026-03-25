@@ -1,10 +1,19 @@
 import { useNavigate } from '@tanstack/react-router'
 import { useQueryClient } from '@tanstack/react-query'
+import { useMemo } from 'react'
 import { toast } from 'sonner'
 import { navRoutes } from '@/lib/nav'
 import { api } from '@/lib/api/client'
+import { useHealth } from '@/lib/api/queries/health'
+import { useInsights } from '@/lib/api/queries/analytics'
+import { useAuditLog } from '@/lib/api/queries/audit'
+import { useSchedules } from '@/lib/api/queries/schedules'
+import { useSessions } from '@/lib/api/queries/sessions'
+import { buildCommandMapModel } from '@/lib/command-map/selectors'
+import { buildCommandMapJumpTarget, buildCommandMapSearchIndex } from '@/lib/command-map/search'
+import type { CommandMapProjectionInput } from '@/lib/command-map/types'
 import {
-  PlusIcon, Trash2Icon, RefreshCwIcon, DownloadIcon,
+  PlusIcon, Trash2Icon, RefreshCwIcon, DownloadIcon, Radar,
 } from 'lucide-react'
 import {
   CommandDialog,
@@ -100,9 +109,27 @@ const actions: ActionCommand[] = [
 export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+  const { data: health } = useHealth({ enabled: open })
+  const { data: insights } = useInsights(7, { enabled: open, refetchInterval: 60_000 })
+  const { data: sessions } = useSessions({ limit: 20 }, { enabled: open })
+  const { data: schedules } = useSchedules({ enabled: open })
+  const { data: audit = [] } = useAuditLog({ limit: 24 }, { enabled: open, refetchInterval: 30_000 })
 
   const close = () => onOpenChange(false)
   const ctx = { navigate, queryClient, close }
+  const commandMapIndex = useMemo(() => {
+    if (!open) return []
+
+    const input: CommandMapProjectionInput = {
+      health: health ?? null,
+      sessions: sessions ?? [],
+      schedules: schedules ?? [],
+      audit,
+      insights: insights ?? null,
+    }
+
+    return buildCommandMapSearchIndex(buildCommandMapModel(input))
+  }, [audit, health, insights, open, schedules, sessions])
 
   return (
     <CommandDialog open={open} onOpenChange={onOpenChange}>
@@ -138,6 +165,33 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
               </CommandItem>
             ))}
           </CommandGroup>
+          {commandMapIndex.length > 0 && (
+            <>
+              <CommandSeparator />
+              <CommandGroup heading="Command Map">
+                {commandMapIndex.map((entry) => (
+                  <CommandItem
+                    key={entry.nodeId}
+                    value={`${entry.label} ${entry.searchText}`}
+                    onSelect={() => {
+                      navigate(buildCommandMapJumpTarget(entry.nodeId))
+                      close()
+                    }}
+                    className="gap-3 py-2"
+                  >
+                    <Radar className="h-4 w-4 text-muted-foreground" />
+                    <div className="flex min-w-0 flex-col">
+                      <span className="font-mono text-xs">{entry.label}</span>
+                      <span className="truncate font-mono text-[10px] text-muted-foreground/40">
+                        {entry.kind} · {entry.layer}
+                        {entry.subtitle ? ` · ${entry.subtitle}` : ''}
+                      </span>
+                    </div>
+                  </CommandItem>
+                ))}
+              </CommandGroup>
+            </>
+          )}
           <CommandSeparator />
           <CommandGroup heading="Actions">
             {actions.map((cmd) => (

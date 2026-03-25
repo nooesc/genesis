@@ -15,6 +15,7 @@ export const Route = createLazyFileRoute('/monitor')({
 })
 
 function MonitorPage() {
+  const search = Route.useSearch()
   const { data: health, isLoading: healthLoading } = useHealth()
   const { data: insights, isLoading: insightsLoading } = useInsights(7, { refetchInterval: 60_000 })
   const { data: sessions, isLoading: sessionsLoading } = useSessions({ limit: 20 })
@@ -44,5 +45,5 @@ function MonitorPage() {
     )
   }
 
-  return <CommandMap model={model} />
+  return <CommandMap model={model} focusNodeId={search.focusNodeId ?? null} focusMode={search.focusMode ?? 'select'} />
 }

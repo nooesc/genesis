@@ -3,7 +3,12 @@ import type { CommandMapNode, CommandMapNodeLayer } from '@/lib/command-map/type
 
 const DEFAULT_LAYERS: CommandMapNodeLayer[] = ['core', 'execution', 'trigger', 'system', 'alert']
 
-export function useCommandMapState(nodes: CommandMapNode[]) {
+interface UseCommandMapStateOptions {
+  focusNodeId?: string | null
+  focusMode?: 'focus' | 'select'
+}
+
+export function useCommandMapState(nodes: CommandMapNode[], options: UseCommandMapStateOptions = {}) {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
   const [isDecluttered, setIsDecluttered] = useState(false)
   const [isFocused, setIsFocused] = useState(false)
@@ -41,6 +46,10 @@ export function useCommandMapState(nodes: CommandMapNode[]) {
   )
 
   const selectedNode = visibleNodes.find(node => node.id === selectedNodeId) ?? null
+  const focusTarget = useMemo(
+    () => options.focusNodeId ? nodes.find(node => node.id === options.focusNodeId) ?? null : null,
+    [nodes, options.focusNodeId],
+  )
 
   useEffect(() => {
     if (!selectedNodeId) {
@@ -54,6 +63,19 @@ export function useCommandMapState(nodes: CommandMapNode[]) {
       setIsFocused(false)
     }
   }, [isFocused, layerVisibleNodes, selectedNodeId])
+
+  useEffect(() => {
+    if (!focusTarget) return
+
+    setVisibleLayers(current => current[focusTarget.layer]
+      ? current
+      : {
+          ...current,
+          [focusTarget.layer]: true,
+        })
+    setSelectedNodeId(focusTarget.id)
+    setIsFocused(options.focusMode === 'focus')
+  }, [focusTarget, options.focusMode])
 
   function toggleFocus() {
     if (!selectedNode) return

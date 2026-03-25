@@ -4,6 +4,7 @@ import type { InsightsData, UsageStats } from '../types'
 
 interface InsightsOptions {
   refetchInterval?: number
+  enabled?: boolean
 }
 
 export function useInsights(days: number = 30, options?: InsightsOptions) {
@@ -11,6 +12,7 @@ export function useInsights(days: number = 30, options?: InsightsOptions) {
     queryKey: ['insights', days],
     queryFn: () => api.get<InsightsData>(`/insights?days=${days}`),
     refetchInterval: options?.refetchInterval ?? 60_000,
+    enabled: options?.enabled ?? true,
   })
 }
 

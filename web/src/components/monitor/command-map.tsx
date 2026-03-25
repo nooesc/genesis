@@ -10,9 +10,11 @@ import { useNodeLayout } from './use-node-layout'
 
 interface CommandMapProps {
   model: CommandMapModel
+  focusNodeId?: string | null
+  focusMode?: 'focus' | 'select'
 }
 
-export function CommandMap({ model }: CommandMapProps) {
+export function CommandMap({ model, focusNodeId = null, focusMode = 'select' }: CommandMapProps) {
   const {
     selectedNodeId,
     selectedNode,
@@ -25,7 +27,7 @@ export function CommandMap({ model }: CommandMapProps) {
     toggleDeclutter,
     toggleFocus,
     resetView,
-  } = useCommandMapState(model.nodes)
+  } = useCommandMapState(model.nodes, { focusNodeId, focusMode })
 
   const edges = useMemo(() => {
     const visibleNodeIds = new Set(visibleNodes.map(node => node.id))
