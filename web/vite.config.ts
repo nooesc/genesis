@@ -1,10 +1,9 @@
-/// <reference types="vitest/config" />
-import { defineConfig } from 'vite'
+import { defineConfig } from 'vitest/config'
 import { TanStackRouterVite } from '@tanstack/router-plugin/vite'
 import react from '@vitejs/plugin-react'
 import path from 'path'
 
-const config = {
+export default defineConfig({
   plugins: [TanStackRouterVite(), react()],
   resolve: {
     alias: {
@@ -25,6 +24,4 @@ const config = {
     environment: 'jsdom',
     setupFiles: ['./src/test/setup.ts'],
   },
-}
-
-export default defineConfig(config as any)
+})
