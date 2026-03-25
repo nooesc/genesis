@@ -22,6 +22,9 @@ vi.mock('@tanstack/react-router', async () => {
   }
 })
 
+const fitViewMock = vi.fn()
+let currentFlowNodes: Array<{ id: string; position: { x: number; y: number } }> = []
+
 vi.mock('@/lib/api/queries/skills', () => ({
   useSkill: () => ({
     data: {
@@ -126,6 +129,11 @@ vi.mock('@xyflow/react', async () => {
     Handle: () => null,
     MarkerType: { ArrowClosed: 'arrowclosed' },
     Position: { Top: 'top', Bottom: 'bottom' },
+    useReactFlow: () => ({
+      viewportInitialized: true,
+      getNode: (id: string) => currentFlowNodes.find(node => node.id === id),
+      fitView: fitViewMock,
+    }),
     ReactFlow: ({
       nodes,
       nodeTypes,
@@ -136,34 +144,38 @@ vi.mock('@xyflow/react', async () => {
       nodeTypes: Record<string, ComponentType<{ id: string; data: unknown }>>
       onNodeDragStop?: (event: unknown, node: { id: string; position: { x: number; y: number } }) => void
       children?: ReactNode
-    }) => (
-      <div data-testid="react-flow">
-        {nodes.map(node => {
-          const NodeComponent = nodeTypes[node.type]
-          return (
-            <div key={node.id} data-testid={`node-${node.id}`}>
-              <NodeComponent id={node.id} data={node.data} />
-              {onNodeDragStop && (
-                <button
-                  type="button"
-                  aria-label={`Drag ${node.id}`}
-                  onClick={() => onNodeDragStop(null, {
-                    id: node.id,
-                    position: {
-                      x: node.position.x + 48,
-                      y: node.position.y + 24,
-                    },
-                  })}
-                >
-                  Drag {node.id}
-                </button>
-              )}
-            </div>
-          )
-        })}
-        {children}
-      </div>
-    ),
+    }) => {
+      currentFlowNodes = nodes
+
+      return (
+        <div data-testid="react-flow">
+          {nodes.map(node => {
+            const NodeComponent = nodeTypes[node.type]
+            return (
+              <div key={node.id} data-testid={`node-${node.id}`}>
+                <NodeComponent id={node.id} data={node.data} />
+                {onNodeDragStop && (
+                  <button
+                    type="button"
+                    aria-label={`Drag ${node.id}`}
+                    onClick={() => onNodeDragStop(null, {
+                      id: node.id,
+                      position: {
+                        x: node.position.x + 48,
+                        y: node.position.y + 24,
+                      },
+                    })}
+                  >
+                    Drag {node.id}
+                  </button>
+                )}
+              </div>
+            )
+          })}
+          {children}
+        </div>
+      )
+    },
     useEdgesState: (initialEdges: unknown[]) => {
       const [edges, setEdges] = ReactModule.useState(initialEdges)
       return [edges, setEdges, vi.fn()] as const
@@ -252,6 +264,8 @@ describe('CommandMap', () => {
   beforeEach(() => {
     installStorageMock()
     vi.mocked(useIsMobile).mockReturnValue(false)
+    fitViewMock.mockReset()
+    currentFlowNodes = []
   })
 
   it('renders Eve, layer toggles, and inspector state', async () => {
@@ -279,6 +293,28 @@ describe('CommandMap', () => {
     expect(screen.getByRole('heading', { name: /Alpha/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Focus/i })).toHaveAttribute('aria-pressed', 'true')
     expect(screen.getAllByText(/session-s1/i)).not.toHaveLength(0)
+  })
+
+  it('centers the viewport when a focus node jump lands', async () => {
+    render(<CommandMap model={model} focusNodeId="session-s1" focusMode="focus" />)
+
+    await waitFor(() => {
+      expect(fitViewMock).toHaveBeenCalled()
+    })
+
+    expect(fitViewMock).toHaveBeenCalledWith(expect.objectContaining({
+      nodes: [{ id: 'session-s1' }],
+      duration: 250,
+      padding: 0.35,
+    }))
+  })
+
+  it('does not recenter the viewport for ordinary local selection', async () => {
+    render(<CommandMap model={model} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /^Alpha(?:\s|$)/i }))
+
+    expect(fitViewMock).not.toHaveBeenCalled()
   })
 
   it('opens a recipe details dialog from the inspector', async () => {

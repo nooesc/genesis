@@ -1,7 +1,7 @@
-import { Background, BackgroundVariant, Controls, ReactFlow } from '@xyflow/react'
+import { Background, BackgroundVariant, Controls, ReactFlow, useReactFlow } from '@xyflow/react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CommandMapModel } from '@/lib/command-map/types'
 import { CommandMapToolbar } from './command-map-toolbar'
 import { CommandMapInspector } from './command-map-inspector'
@@ -25,6 +25,33 @@ type CommandMapOverlay =
   | { kind: 'trigger'; scheduleId: string }
   | { kind: 'thread'; sessionId: string }
   | { kind: 'events'; title: string; sessionId?: string | null; eventType?: string | null }
+
+function CommandMapViewportFocus({ focusNodeId }: { focusNodeId: string | null }) {
+  const reactFlow = useReactFlow()
+  const lastFocusedNodeId = useRef<string | null>(null)
+
+  useEffect(() => {
+    if (!focusNodeId) {
+      lastFocusedNodeId.current = null
+      return
+    }
+
+    if (!reactFlow.viewportInitialized) return
+    if (lastFocusedNodeId.current === focusNodeId) return
+
+    const target = reactFlow.getNode(focusNodeId)
+    if (!target) return
+
+    lastFocusedNodeId.current = focusNodeId
+    void reactFlow.fitView({
+      nodes: [{ id: focusNodeId }],
+      padding: 0.35,
+      duration: 250,
+    })
+  }, [focusNodeId, reactFlow])
+
+  return null
+}
 
 export function CommandMap({ model, focusNodeId = null, focusMode = 'select' }: CommandMapProps) {
   const isMobile = useIsMobile()
@@ -145,6 +172,7 @@ export function CommandMap({ model, focusNodeId = null, focusMode = 'select' }: 
                 color="rgba(148, 163, 184, 0.18)"
               />
               <Controls showInteractive={false} />
+              <CommandMapViewportFocus focusNodeId={focusNodeId} />
             </ReactFlow>
           </CardContent>
         </Card>
