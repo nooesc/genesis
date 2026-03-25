@@ -1139,6 +1139,7 @@ impl AgentLoop {
     ///
     /// Returns `Some(question)` when a tool requests user clarification,
     /// signalling the caller to pause the agent loop.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn process_tool_results<F>(
         &mut self,
         session_id: &str,
