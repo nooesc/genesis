@@ -673,12 +673,16 @@ fn render_frame(
         let area = term.viewport_area();
         app.viewport_width = area.width;
         app.viewport_height = area.height;
+        // Approximate the new message area height (status + input + separator ≈ 5 rows).
+        // The exact value is computed during render, but this estimate is sufficient
+        // for scroll clamping on resize.
+        app.message_area_height = area.height.saturating_sub(5);
 
         // Cancel all running effects — they hold stale coordinates from
         // the pre-resize viewport.
         app.effects.on_resize();
 
-        // Reclamp scroll offset for the new width.
+        // Reclamp scroll offset for the new dimensions.
         app.chat.reclamp_scroll(area.width, app.message_area_height);
 
         // Rebuild the transcript overlay if open.

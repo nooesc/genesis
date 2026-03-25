@@ -984,13 +984,38 @@ impl ChatWidget {
             prev_is_user = Some(cur_is_user);
         }
 
-        // Count message cells (User/Agent) that were clipped above.
-        let skipped_message_count = self
-            .committed_cells
-            .iter()
-            .take(self.committed_cells.len().saturating_sub(cells_collected))
-            .filter(|c| matches!(c, HistoryCell::User(_) | HistoryCell::Agent(_)))
-            .count();
+        // Count conversation *turns* (not individual blocks) clipped above.
+        // With per-block-cell architecture, one agent response may span
+        // multiple AgentCell entries. Collapse consecutive Agent cells into
+        // one turn so the hint says "↑ 2 more" for 2 turns, not "↑ 12 more"
+        // for 12 paragraph blocks.
+        let skipped_message_count = {
+            let skipped = self
+                .committed_cells
+                .iter()
+                .take(self.committed_cells.len().saturating_sub(cells_collected));
+            let mut turns = 0usize;
+            let mut prev_is_agent = false;
+            for cell in skipped {
+                match cell {
+                    HistoryCell::User(_) => {
+                        turns += 1;
+                        prev_is_agent = false;
+                    }
+                    HistoryCell::Agent(_) => {
+                        if !prev_is_agent {
+                            turns += 1;
+                        }
+                        prev_is_agent = true;
+                    }
+                    HistoryCell::Tool(_) => {
+                        // Tools are part of the agent turn, don't count separately.
+                        prev_is_agent = false;
+                    }
+                }
+            }
+            turns
+        };
 
         // Also account for a separator between the last committed cell
         // and the active cell, if the active cell was rendered above.
