@@ -13,7 +13,7 @@ use crate::ToolRuntime;
 ///
 /// This is the single source of truth for the `"Error:"` convention used
 /// throughout the agent loop, trajectory scorer, and auto-tagger.
-/// Case-insensitive to handle tools that return `"error:"` lowercase.
+/// Handles both `"Error:"` (title-case) and `"error:"` (lowercase) prefixes.
 pub(crate) fn is_tool_error(content: &str) -> bool {
     content.starts_with("Error:") || content.starts_with("error:")
 }

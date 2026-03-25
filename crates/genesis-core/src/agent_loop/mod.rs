@@ -1139,6 +1139,13 @@ impl AgentLoop {
     ///
     /// Returns `Some(question)` when a tool requests user clarification,
     /// signalling the caller to pause the agent loop.
+    ///
+    /// # Arguments
+    ///
+    /// * `executed_results` — must contain exactly one entry per `None` in
+    ///   `veto_reasons` (i.e. one result per non-vetoed tool call).
+    /// * `tool_elapsed_ms` — wall-clock duration of the entire parallel batch,
+    ///   not per-tool timing. All tools in the batch report this same value.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn process_tool_results<F>(
         &mut self,
@@ -1153,6 +1160,11 @@ impl AgentLoop {
     where
         F: FnMut(StreamEvent<'_>),
     {
+        debug_assert_eq!(
+            veto_reasons.iter().filter(|v| v.is_none()).count(),
+            executed_results.len(),
+            "executed_results must have one entry per non-vetoed tool call"
+        );
         let mut executed_results = executed_results.into_iter();
         let mut clarification = None;
         for (tc, veto_reason) in effective_tool_calls.iter().zip(veto_reasons.into_iter()) {
