@@ -2,6 +2,10 @@ import { useQuery } from '@tanstack/react-query'
 import { api } from '../client'
 import type { Skill, SkillUsageStats, SkillUsageRecord } from '../types'
 
+interface SkillsQueryOptions {
+  enabled?: boolean
+}
+
 interface SkillsResponse {
   skills: Skill[]
   count: number
@@ -13,7 +17,7 @@ interface SkillUsageRecentResponse {
   count: number
 }
 
-export function useSkills() {
+export function useSkills(options?: SkillsQueryOptions) {
   return useQuery({
     queryKey: ['skills'],
     queryFn: async () => {
@@ -21,6 +25,7 @@ export function useSkills() {
       return res.skills
     },
     refetchInterval: 60_000,
+    enabled: options?.enabled ?? true,
   })
 }
 

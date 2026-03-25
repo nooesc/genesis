@@ -428,7 +428,7 @@ fn rpc_server_loop(
     call_count: Arc<AtomicUsize>,
     max_calls: usize,
 ) {
-    use std::io::{BufRead, Write};
+    use std::io::Write;
 
     // Accept one connection with a timeout
     let stream = match accept_with_timeout(
@@ -438,6 +438,9 @@ fn rpc_server_loop(
         Some(s) => s,
         None => return,
     };
+    if let Err(e) = stream.set_nonblocking(false) {
+        tracing::warn!(error = %e, "failed to restore blocking mode on code execution socket");
+    }
     if let Err(e) =
         stream.set_read_timeout(Some(Duration::from_secs(timeouts::CODE_EXEC_READ_SECS)))
     {
@@ -449,7 +452,7 @@ fn rpc_server_loop(
 
     loop {
         let mut line = String::new();
-        match reader.read_line(&mut line) {
+        match read_rpc_line(&mut reader, &mut line) {
             Ok(0) | Err(_) => break, // EOF or error
             Ok(_) => {}
         }
@@ -528,6 +531,18 @@ fn rpc_server_loop(
     }
 }
 
+fn read_rpc_line(
+    reader: &mut impl std::io::BufRead,
+    line: &mut String,
+) -> std::io::Result<usize> {
+    loop {
+        match reader.read_line(line) {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => return result,
+        }
+    }
+}
+
 /// Accept a connection with a timeout by polling in a loop.
 fn accept_with_timeout(
     listener: &std::os::unix::net::UnixListener,
@@ -546,6 +561,7 @@ fn accept_with_timeout(
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(_) => return None,
         }
     }
@@ -762,6 +778,7 @@ fn ptc_error(error: &str, tool_calls: usize, start: std::time::Instant) -> ToolO
 mod tests {
     use super::*;
     use crate::ToolContext;
+    use std::io::{self, BufRead, Read};
 
     fn ctx() -> ToolContext {
         crate::test_utils::test_ctx_destructive()
@@ -910,6 +927,61 @@ mod tests {
         assert!(output.content.contains("item 0"));
         assert!(output.content.contains("item 1"));
         assert!(output.content.contains("item 2"));
+    }
+
+    struct InterruptedThenLine {
+        interrupted_once: bool,
+        data: &'static [u8],
+        offset: usize,
+    }
+
+    impl Read for InterruptedThenLine {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if !self.interrupted_once {
+                self.interrupted_once = true;
+                return Err(io::Error::new(io::ErrorKind::Interrupted, "signal"));
+            }
+
+            if self.offset >= self.data.len() {
+                return Ok(0);
+            }
+
+            let remaining = &self.data[self.offset..];
+            let count = remaining.len().min(buf.len());
+            buf[..count].copy_from_slice(&remaining[..count]);
+            self.offset += count;
+            Ok(count)
+        }
+    }
+
+    impl BufRead for InterruptedThenLine {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            if !self.interrupted_once {
+                self.interrupted_once = true;
+                return Err(io::Error::new(io::ErrorKind::Interrupted, "signal"));
+            }
+
+            Ok(&self.data[self.offset..])
+        }
+
+        fn consume(&mut self, amt: usize) {
+            self.offset = (self.offset + amt).min(self.data.len());
+        }
+    }
+
+    #[test]
+    fn rpc_line_reader_retries_interrupted_reads() {
+        let mut reader = InterruptedThenLine {
+            interrupted_once: false,
+            data: b"{\"tool\":\"nonexistent\"}\n",
+            offset: 0,
+        };
+        let mut line = String::new();
+
+        let bytes = read_rpc_line(&mut reader, &mut line).expect("read should recover");
+
+        assert_eq!(bytes, line.len());
+        assert_eq!(line, "{\"tool\":\"nonexistent\"}\n");
     }
 
     // --- PTC stub generation tests ---
@@ -1076,6 +1148,49 @@ print(result)
         assert!(
             response.contains("not available"),
             "expected error for unknown tool, got: {response}"
+        );
+
+        drop(stream);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn ptc_rpc_waits_for_request_after_connect() {
+        use std::io::{BufRead, Write};
+        use std::os::unix::net::UnixStream;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock_path = dir.path().join("delayed.sock");
+
+        let registry = crate::default_registry();
+        let context = ctx();
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_clone = call_count.clone();
+
+        let listener = std::os::unix::net::UnixListener::bind(&sock_path).unwrap();
+        let server = std::thread::spawn(move || {
+            rpc_server_loop(listener, &registry, &context, call_count_clone, 50);
+        });
+
+        let stream = UnixStream::connect(&sock_path).unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+
+        std::thread::sleep(Duration::from_millis(200));
+
+        let mut reader = std::io::BufReader::new(&stream);
+        let mut writer = &stream;
+        writeln!(writer, r#"{{"tool": "nonexistent", "args": {{}}}}"#).unwrap();
+
+        let mut response = String::new();
+        reader.read_line(&mut response).unwrap();
+        assert!(
+            response.contains("not available"),
+            "expected delayed request to succeed, got: {response}"
         );
 
         drop(stream);

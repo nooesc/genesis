@@ -7,7 +7,11 @@ interface SessionsParams {
   limit?: number
 }
 
-export function useSessions(params?: SessionsParams) {
+interface SessionsQueryOptions {
+  enabled?: boolean
+}
+
+export function useSessions(params?: SessionsParams, options?: SessionsQueryOptions) {
   const searchParams = new URLSearchParams()
   if (params?.search) searchParams.set('search', params.search)
   if (params?.limit !== undefined) searchParams.set('limit', String(params.limit))
@@ -20,6 +24,7 @@ export function useSessions(params?: SessionsParams) {
       return res.sessions as SessionSummary[]
     },
     refetchInterval: 30_000,
+    enabled: options?.enabled ?? true,
   })
 }
 

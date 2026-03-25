@@ -9,6 +9,7 @@ interface AuditParams {
 
 interface AuditQueryOptions {
   refetchInterval?: number
+  enabled?: boolean
 }
 
 interface AuditResponse {
@@ -29,6 +30,7 @@ export function useAuditLog(params?: AuditParams, options?: AuditQueryOptions) {
       return res.entries
     },
     refetchInterval: options?.refetchInterval,
+    enabled: options?.enabled ?? true,
   })
 }
 

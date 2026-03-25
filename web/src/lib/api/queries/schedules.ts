@@ -7,7 +7,11 @@ interface SchedulesResponse {
   count: number
 }
 
-export function useSchedules() {
+interface SchedulesQueryOptions {
+  enabled?: boolean
+}
+
+export function useSchedules(options?: SchedulesQueryOptions) {
   return useQuery({
     queryKey: ['schedules'],
     queryFn: async () => {
@@ -15,5 +19,6 @@ export function useSchedules() {
       return res.schedules
     },
     refetchInterval: 30_000,
+    enabled: options?.enabled ?? true,
   })
 }

@@ -5,7 +5,7 @@ import type { Skill } from '../types'
 interface CreateSkillInput {
   name: string
   description: string
-  content: string
+  instructions: string
   tags?: string[]
 }
 
