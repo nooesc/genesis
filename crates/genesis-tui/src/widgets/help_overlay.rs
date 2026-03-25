@@ -105,6 +105,7 @@ impl HelpOverlay {
             ("Shift+Down", "Scroll chat down (1 line)"),
             ("Ctrl+End", "Jump to bottom of chat"),
             ("Up/Down", "Navigate input history / lines"),
+            ("Alt+M", "Toggle mouse: scroll ↔ select text"),
             ("Esc", "Close overlay / dismiss popup"),
         ];
 

@@ -97,6 +97,9 @@ pub struct App {
     pub context_window_size: usize,
     /// Last known viewport width (used for transcript overlay).
     pub viewport_width: u16,
+    /// Whether mouse capture is active (true = scroll mode, false = select mode).
+    /// Toggled via Shift+M to allow terminal-native text selection.
+    pub mouse_captured: bool,
     /// Active tool approval overlay (shown when a tool needs user approval).
     pub approval: Option<crate::widgets::approval_overlay::ApprovalOverlay>,
     /// Channel to send approval responses back to the tool execution thread.
@@ -393,6 +396,10 @@ impl App {
                         let _ = self
                             .app_tx
                             .send(AppEvent::CopyToClipboard(text.to_string()));
+                        self.status_bar
+                            .show_transient_warning("\u{2713} Copied to clipboard");
+                    } else {
+                        self.status_bar.show_transient_warning("Nothing to copy");
                     }
                     self.frame_requester.schedule_frame();
                 }
@@ -626,6 +633,25 @@ impl App {
                 self.command_popup.show();
             } else {
                 self.command_popup.hide();
+            }
+            self.frame_requester.schedule_frame();
+            return;
+        }
+
+        // Alt+M — toggle mouse capture (scroll mode vs select mode).
+        // When disabled, the terminal handles mouse events natively, allowing
+        // text selection in Alacritty, tmux, etc.
+        if key.code == KeyCode::Char('m') && key.modifiers.contains(KeyModifiers::ALT) {
+            self.mouse_captured = !self.mouse_captured;
+            if self.mouse_captured {
+                let _ =
+                    crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture);
+                self.status_bar.show_transient_warning("Mouse: scroll mode");
+            } else {
+                let _ =
+                    crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
+                self.status_bar
+                    .show_transient_warning("Mouse: select mode (Alt+M to restore scroll)");
             }
             self.frame_requester.schedule_frame();
             return;
@@ -1038,6 +1064,7 @@ mod tests {
             streaming_chars: 0,
             context_window_size: 128_000,
             viewport_width: 80,
+            mouse_captured: true,
             approval: None,
             approval_response: None,
             approval_queue: std::collections::VecDeque::new(),

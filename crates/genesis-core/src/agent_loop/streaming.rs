@@ -11,7 +11,6 @@ use super::tools::{execute_tool_calls_parallel, summarize_args};
 use super::types::{format_blocked_reasons, StreamEvent};
 use super::{AgentError, AgentLoop, AgentResult};
 use crate::hooks::HookEvent;
-use crate::sanitize;
 
 pub(crate) struct StreamUpdate {
     pub(crate) contents: Vec<String>,
@@ -102,7 +101,6 @@ impl AgentLoop {
         // Reset stuck-loop state at the start of each new user turn so
         // stale failure counts from a previous turn don't cause false positives.
         self.tool_failure_counts.clear();
-        self.nudge_sent = false;
         self.tools.clear_recalled_memory_ids();
 
         let hook_session = self.session_id_str().to_owned();
@@ -460,86 +458,15 @@ impl AgentLoop {
                         let tool_exec_duration = tool_exec_start.elapsed();
 
                         let tool_exec_duration_ms = tool_exec_duration.as_millis() as u64;
-                        let mut clarification = None;
-                        let mut executed_results = executed_results.into_iter();
-                        for (tc, veto_reason) in
-                            streamed_tool_calls.iter().zip(veto_reasons.into_iter())
-                        {
-                            let lua_vetoed = veto_reason.is_some();
-                            let (mut result, requires_input) = match veto_reason {
-                                Some(reason) => (
-                                    format!("Error: tool call blocked by Lua hook: {reason}"),
-                                    false,
-                                ),
-                                None => executed_results.next().expect(
-                                    "executed tool results should align with allowed calls",
-                                ),
-                            };
-                            result = sanitize::sanitize_credentials(&result);
-                            // Extract discovered tool names from find_tools results
-                            // (only when core set filtering is active).
-                            if self.config.core_tools.is_some()
-                                && tc.function.name == "find_tools"
-                                && !result.starts_with("Error:")
-                                && !result.starts_with("No tools")
-                            {
-                                for line in result.lines() {
-                                    let trimmed = line.trim();
-                                    if let Some(rest) = trimmed.strip_prefix("**") {
-                                        if let Some(name_end) = rest.find("**") {
-                                            self.discover_tool(&rest[..name_end]);
-                                        }
-                                    }
-                                }
-                            }
-                            let tool_success = !result.starts_with("Error:");
-                            let result = self.run_lua_post_tool_call(&tc.function.name, &result);
-                            on_event(StreamEvent::ToolCallEnd {
-                                name: &tc.function.name,
-                                call_id: &tc.id,
-                                duration_ms: tool_exec_duration_ms,
-                                success: tool_success,
-                            });
-                            if !tool_success {
-                                let count = self
-                                    .tool_failure_counts
-                                    .entry(tc.function.name.clone())
-                                    .or_insert(0);
-                                *count += 1;
-                            } else {
-                                self.tool_failure_counts.remove(&tc.function.name);
-                                // Auto-discover tools called outside core set.
-                                if self.config.core_tools.is_some() {
-                                    self.discover_tool(&tc.function.name);
-                                }
-                            }
-                            self.fire_shell_hooks(
-                                HookEvent::PostToolCall,
-                                serde_json::json!({
-                                    "session_id": hook_session,
-                                    "tool_name": tc.function.name,
-                                    "tool_call_id": tc.id,
-                                    "success": tool_success,
-                                    "result": result,
-                                    "requires_input": requires_input,
-                                    "streaming": true,
-                                    "lua_vetoed": lua_vetoed,
-                                }),
-                            );
-                            let result = self
-                                .push_message_with_lua_hooks(
-                                    &hook_session,
-                                    ChatMessage::tool_result(&tc.id, result),
-                                )
-                                .and_then(|message| message.content_text().map(str::to_owned))
-                                .unwrap_or_default();
-                            self.trajectory
-                                .record_tool_result(&tc.function.name, &result);
-                            if requires_input {
-                                on_event(StreamEvent::ClarificationNeeded { question: &result });
-                                clarification = Some(result.clone());
-                            }
-                        }
+                        let clarification = self.process_tool_results(
+                            &hook_session,
+                            &streamed_tool_calls,
+                            veto_reasons,
+                            executed_results,
+                            tool_exec_duration_ms,
+                            true,
+                            &mut on_event,
+                        );
 
                         self.maybe_inject_stuck_nudge();
 
@@ -699,82 +626,15 @@ impl AgentLoop {
                             let tool_exec_duration = tool_exec_start.elapsed();
                             let tool_exec_duration_ms = tool_exec_duration.as_millis() as u64;
 
-                            let mut clarification = None;
-                            let mut executed_results = executed_results.into_iter();
-                            for (tc, veto_reason) in tool_calls.iter().zip(veto_reasons.into_iter())
-                            {
-                                let lua_vetoed = veto_reason.is_some();
-                                let (mut result, requires_input) = match veto_reason {
-                                    Some(reason) => (
-                                        format!("Error: tool call blocked by Lua hook: {reason}"),
-                                        false,
-                                    ),
-                                    None => executed_results.next().expect(
-                                        "executed tool results should align with allowed calls",
-                                    ),
-                                };
-                                result = sanitize::sanitize_credentials(&result);
-                                if self.config.core_tools.is_some()
-                                    && tc.function.name == "find_tools"
-                                    && !result.starts_with("Error:")
-                                    && !result.starts_with("No tools")
-                                {
-                                    for line in result.lines() {
-                                        let trimmed = line.trim();
-                                        if let Some(rest) = trimmed.strip_prefix("**") {
-                                            if let Some(name_end) = rest.find("**") {
-                                                self.discover_tool(&rest[..name_end]);
-                                            }
-                                        }
-                                    }
-                                }
-                                let tool_success = !result.starts_with("Error:");
-                                let result =
-                                    self.run_lua_post_tool_call(&tc.function.name, &result);
-                                on_event(StreamEvent::ToolCallEnd {
-                                    name: &tc.function.name,
-                                    call_id: &tc.id,
-                                    duration_ms: tool_exec_duration_ms,
-                                    success: tool_success,
-                                });
-                                if !tool_success {
-                                    let count = self
-                                        .tool_failure_counts
-                                        .entry(tc.function.name.clone())
-                                        .or_insert(0);
-                                    *count += 1;
-                                } else {
-                                    self.tool_failure_counts.remove(&tc.function.name);
-                                }
-                                self.fire_shell_hooks(
-                                    HookEvent::PostToolCall,
-                                    serde_json::json!({
-                                        "session_id": hook_session,
-                                        "tool_name": tc.function.name,
-                                        "tool_call_id": tc.id,
-                                        "success": tool_success,
-                                        "result": result,
-                                        "requires_input": requires_input,
-                                        "streaming": false,
-                                        "lua_vetoed": lua_vetoed,
-                                    }),
-                                );
-                                let result = self
-                                    .push_message_with_lua_hooks(
-                                        &hook_session,
-                                        ChatMessage::tool_result(&tc.id, result),
-                                    )
-                                    .and_then(|message| message.content_text().map(str::to_owned))
-                                    .unwrap_or_default();
-                                self.trajectory
-                                    .record_tool_result(&tc.function.name, &result);
-                                if requires_input {
-                                    on_event(StreamEvent::ClarificationNeeded {
-                                        question: &result,
-                                    });
-                                    clarification = Some(result.clone());
-                                }
-                            }
+                            let clarification = self.process_tool_results(
+                                &hook_session,
+                                &tool_calls,
+                                veto_reasons,
+                                executed_results,
+                                tool_exec_duration_ms,
+                                false,
+                                &mut on_event,
+                            );
 
                             self.maybe_inject_stuck_nudge();
 

@@ -246,6 +246,7 @@ pub async fn run_tui(
         streaming_chars: 0,
         context_window_size,
         viewport_width: viewport_area.width,
+        mouse_captured: true,
         approval: None,
         approval_response: None,
         approval_queue: std::collections::VecDeque::new(),

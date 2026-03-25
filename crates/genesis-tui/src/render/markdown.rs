@@ -307,7 +307,8 @@ impl MarkdownWriter {
             Event::End(TagEnd::CodeBlock) => {
                 if let Some((lang, code)) = self.code_block.take() {
                     // Emit language label line if the fence specified a language.
-                    if !lang.is_empty() {
+                    let has_label = !lang.is_empty();
+                    if has_label {
                         self.emit_code_lang_label(&lang);
                     }
 
@@ -321,6 +322,16 @@ impl MarkdownWriter {
                         }
                     } else {
                         self.lines.extend(highlighted);
+                    }
+
+                    // Bottom separator to visually close the code block.
+                    if has_label {
+                        let mut bottom_spans = Vec::new();
+                        if self.blockquote_depth > 0 {
+                            bottom_spans.extend(blockquote_prefix(self.blockquote_depth));
+                        }
+                        bottom_spans.push(Span::styled("─".repeat(60), Style::default().fg(DIM)));
+                        self.lines.push(Line::from(bottom_spans));
                     }
                 }
             }
@@ -848,11 +859,13 @@ mod tests {
         let md = "```rust\nlet x = 42;\n```";
         let lines = markdown_to_lines(md);
         assert!(
-            !lines.is_empty(),
-            "code fence should produce at least one line"
+            lines.len() >= 3,
+            "code fence should produce label + code + separator, got {}",
+            lines.len()
         );
-        // Skip the first line (language label) — only code lines have CODE_BG.
-        for line in lines.iter().skip(1) {
+        // Skip the first line (language label) and last line (bottom separator) —
+        // only the code lines between them have CODE_BG.
+        for line in lines.iter().skip(1).take(lines.len() - 2) {
             for span in &line.spans {
                 assert_eq!(
                     span.style.bg,

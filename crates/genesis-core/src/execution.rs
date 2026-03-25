@@ -33,6 +33,16 @@ struct SandboxComponents {
     base_config: SandboxConfig,
 }
 
+/// Provider clients built for a single agent loop invocation.
+///
+/// Groups the primary LLM client, optional tool-routing client, and
+/// optional fallback clients so they can be constructed in one place.
+struct ProviderClients {
+    primary: genesis_provider::ChatClient,
+    tool_client: Option<genesis_provider::ChatClient>,
+    fallbacks: Vec<(genesis_provider::ChatClient, std::time::Duration)>,
+}
+
 /// Bridges the async `SandboxManager` into the sync `SandboxExecutor` trait.
 struct SandboxExecutorImpl {
     manager: Arc<SandboxManager>,
@@ -94,6 +104,55 @@ fn plugins_enabled(loaded: &LoadedConfig, overrides: PluginRuntimeOverrides) -> 
     overrides
         .plugins_enabled
         .unwrap_or(loaded.config.plugins.enabled && !env_flag("GENESIS_NO_PLUGINS"))
+}
+
+/// Build the standard `config_values` map for a `LuaRuntimeConfig`.
+///
+/// Shared between `SessionExecutionService::lua_runtime_config` and
+/// `ExecutionSubagentSpawner::build_lua_runtime` to eliminate duplication.
+fn build_lua_config_values(
+    loaded: &LoadedConfig,
+    profile: &str,
+    backend: &str,
+    model: &str,
+    platform: &str,
+    plugins_enabled: bool,
+    personality: Option<&str>,
+) -> BTreeMap<String, String> {
+    let mut values = BTreeMap::new();
+    values.insert("profile".to_owned(), profile.to_owned());
+    values.insert("provider_backend".to_owned(), backend.to_owned());
+    values.insert("provider_model".to_owned(), model.to_owned());
+    values.insert("delivery_platform".to_owned(), platform.to_owned());
+    values.insert("plugins_enabled".to_owned(), plugins_enabled.to_string());
+    values.insert(
+        "plugin_hook_timeout_ms".to_owned(),
+        loaded.config.plugins.hook_timeout_ms.to_string(),
+    );
+    values.insert(
+        "plugin_tool_timeout_ms".to_owned(),
+        loaded.config.plugins.tool_timeout_ms.to_string(),
+    );
+    values.insert(
+        "plugin_auto_disable_after".to_owned(),
+        loaded.config.plugins.auto_disable_after.to_string(),
+    );
+    values.insert(
+        "data_dir".to_owned(),
+        loaded.paths.data_dir.to_string_lossy().into_owned(),
+    );
+    values.insert(
+        "database_path".to_owned(),
+        loaded.paths.database_path.to_string_lossy().into_owned(),
+    );
+    values.insert(
+        "plugin_dir".to_owned(),
+        loaded.paths.plugin_dir.to_string_lossy().into_owned(),
+    );
+    if let Some(personality) = personality {
+        values.insert("personality".to_owned(), personality.to_owned());
+    }
+    values
 }
 
 /// Bridges the async `EmbeddingProvider` into the sync `EmbeddingService` trait.
@@ -449,55 +508,15 @@ impl<'a> SessionExecutionService<'a> {
     ) -> LuaRuntimeConfig {
         let cache_key = self.lua_runtime_cache_key(session_id, platform);
         let personality = cache_key.personality.clone();
-        let mut config_values = BTreeMap::new();
-        config_values.insert("profile".to_owned(), self.loaded.config.profile.clone());
-        config_values.insert(
-            "provider_backend".to_owned(),
-            cache_key.provider_backend.clone(),
+        let config_values = build_lua_config_values(
+            self.loaded,
+            &self.loaded.config.profile,
+            &cache_key.provider_backend,
+            &cache_key.provider_model,
+            &cache_key.delivery_platform,
+            self.plugins_enabled(),
+            personality.as_deref(),
         );
-        config_values.insert(
-            "provider_model".to_owned(),
-            cache_key.provider_model.clone(),
-        );
-        config_values.insert(
-            "delivery_platform".to_owned(),
-            cache_key.delivery_platform.clone(),
-        );
-        config_values.insert(
-            "plugins_enabled".to_owned(),
-            self.plugins_enabled().to_string(),
-        );
-        config_values.insert(
-            "plugin_hook_timeout_ms".to_owned(),
-            self.loaded.config.plugins.hook_timeout_ms.to_string(),
-        );
-        config_values.insert(
-            "plugin_tool_timeout_ms".to_owned(),
-            self.loaded.config.plugins.tool_timeout_ms.to_string(),
-        );
-        config_values.insert(
-            "plugin_auto_disable_after".to_owned(),
-            self.loaded.config.plugins.auto_disable_after.to_string(),
-        );
-        config_values.insert(
-            "data_dir".to_owned(),
-            self.loaded.paths.data_dir.to_string_lossy().into_owned(),
-        );
-        config_values.insert(
-            "database_path".to_owned(),
-            self.loaded
-                .paths
-                .database_path
-                .to_string_lossy()
-                .into_owned(),
-        );
-        config_values.insert(
-            "plugin_dir".to_owned(),
-            self.loaded.paths.plugin_dir.to_string_lossy().into_owned(),
-        );
-        if let Some(ref personality) = personality {
-            config_values.insert("personality".to_owned(), personality.clone());
-        }
 
         LuaRuntimeConfig {
             plugin_dir: self.loaded.paths.plugin_dir.clone(),
@@ -754,16 +773,17 @@ impl<'a> SessionExecutionService<'a> {
         SessionStore::new(&self.loaded.config.storage.database_path)
     }
 
-    async fn build_agent_loop(
+    /// Build a fully-wired `ToolRuntime` for a single agent loop invocation.
+    ///
+    /// Attaches MCP, approval handler, terminal/sandbox backend, working
+    /// directory, Lua runtime, embedding provider, keyword enricher,
+    /// auto-consolidation threshold, cache watcher, and tool filter.
+    async fn wire_tool_runtime(
         &self,
-        session_id: String,
-        platform: DeliveryPlatform,
-        history: Vec<ChatMessage>,
-        user_prompt: Option<&str>,
-    ) -> Result<AgentLoop, SessionExecutionError> {
-        let execution_context =
-            build_execution_context_from_loaded(self.loaded, session_id, platform);
-        let mut tool_runtime = build_default_tool_runtime(&execution_context);
+        execution_context: &crate::ExecutionContext,
+        lua_runtime: &Option<Arc<LuaRuntime>>,
+    ) -> Result<ToolRuntime, SessionExecutionError> {
+        let mut tool_runtime = build_default_tool_runtime(execution_context);
 
         // Attach MCP manager if we connected any servers at service creation
         if let Some(mcp) = &self.mcp {
@@ -801,13 +821,8 @@ impl<'a> SessionExecutionService<'a> {
             tool_runtime.set_default_working_dir(dir.clone());
         }
 
-        // Warm the Lua plugin runtime once per session so plugin state survives
-        // across turns and later middleware can reuse the cached runtime.
-        let lua_runtime = self.lua_runtime_for_session(
-            &execution_context.plan.session_id,
-            execution_context.plan.platform.clone(),
-        );
-        if let Some(runtime) = &lua_runtime {
+        // Attach Lua plugin runtime to tool runtime
+        if let Some(runtime) = lua_runtime {
             tool_runtime.set_lua_runtime(Arc::clone(runtime));
         }
 
@@ -883,6 +898,111 @@ impl<'a> SessionExecutionService<'a> {
             }
             tool_runtime.retain(&allowed);
         }
+
+        Ok(tool_runtime)
+    }
+
+    /// Build all provider clients (primary, tool-routing, fallback) for a
+    /// single agent loop invocation.
+    async fn build_provider_clients(&self) -> Result<ProviderClients, SessionExecutionError> {
+        let (backend, model) = self.effective_provider_selection();
+        let cb_cfg = self.loaded.config.provider.circuit_breaker.as_ref();
+        let primary = genesis_provider::client_from_config_with_circuit_breaker(
+            backend,
+            model,
+            self.loaded.config.provider.base_url.as_deref(),
+            self.loaded.config.provider.api_key_env.as_deref(),
+            cb_cfg.map(|c| c.failure_threshold),
+            cb_cfg.map(|c| c.cooldown_secs),
+        )
+        .await?;
+        debug!(
+            provider_backend = %backend,
+            model = %model,
+            "built primary provider client"
+        );
+
+        // Optional tool-routing client
+        let tool_client = if let Some(tp) = &self.loaded.config.tool_provider {
+            let tp_cb = tp.circuit_breaker.as_ref();
+            let client = genesis_provider::client_from_config_with_circuit_breaker(
+                &tp.backend,
+                &tp.model,
+                tp.base_url.as_deref(),
+                tp.api_key_env.as_deref(),
+                tp_cb.map(|c| c.failure_threshold),
+                tp_cb.map(|c| c.cooldown_secs),
+            )
+            .await?;
+            debug!(
+                tool_provider_backend = %tp.backend,
+                tool_model = %tp.model,
+                "multi-provider routing enabled"
+            );
+            Some(client)
+        } else {
+            None
+        };
+
+        // Optional fallback clients for automatic failover
+        let fallbacks = if self.loaded.config.fallback_providers.is_empty() {
+            Vec::new()
+        } else {
+            use std::time::Duration;
+
+            let default_timeout = Duration::from_secs(30);
+            let mut fallbacks = Vec::new();
+            for fp in &self.loaded.config.fallback_providers {
+                let fb_cb = fp.circuit_breaker.as_ref();
+                let fb_client = genesis_provider::client_from_config_with_circuit_breaker(
+                    &fp.backend,
+                    &fp.model,
+                    fp.base_url.as_deref(),
+                    fp.api_key_env.as_deref(),
+                    fb_cb.map(|c| c.failure_threshold),
+                    fb_cb.map(|c| c.cooldown_secs),
+                )
+                .await?;
+                let timeout = fp
+                    .timeout_secs
+                    .map(Duration::from_secs)
+                    .unwrap_or(default_timeout);
+                fallbacks.push((fb_client, timeout));
+            }
+            debug!(
+                fallback_count = self.loaded.config.fallback_providers.len(),
+                "provider failover enabled"
+            );
+            fallbacks
+        };
+
+        Ok(ProviderClients {
+            primary,
+            tool_client,
+            fallbacks,
+        })
+    }
+
+    async fn build_agent_loop(
+        &self,
+        session_id: String,
+        platform: DeliveryPlatform,
+        history: Vec<ChatMessage>,
+        user_prompt: Option<&str>,
+    ) -> Result<AgentLoop, SessionExecutionError> {
+        let execution_context =
+            build_execution_context_from_loaded(self.loaded, session_id, platform);
+
+        // Warm the Lua plugin runtime once per session so plugin state survives
+        // across turns and later middleware can reuse the cached runtime.
+        let lua_runtime = self.lua_runtime_for_session(
+            &execution_context.plan.session_id,
+            execution_context.plan.platform.clone(),
+        );
+
+        let tool_runtime = self
+            .wire_tool_runtime(&execution_context, &lua_runtime)
+            .await?;
 
         // Load skills, user model, project context, and relevant memories
         let db_path = &self.loaded.config.storage.database_path;
@@ -960,22 +1080,7 @@ impl<'a> SessionExecutionService<'a> {
             prompt_builder = prompt_builder.memories(m);
         }
         let system_prompt = prompt_builder.build();
-        let (backend, model) = self.effective_provider_selection();
-        let cb_cfg = self.loaded.config.provider.circuit_breaker.as_ref();
-        let client = genesis_provider::client_from_config_with_circuit_breaker(
-            backend,
-            model,
-            self.loaded.config.provider.base_url.as_deref(),
-            self.loaded.config.provider.api_key_env.as_deref(),
-            cb_cfg.map(|c| c.failure_threshold),
-            cb_cfg.map(|c| c.cooldown_secs),
-        )
-        .await?;
-        debug!(
-            provider_backend = %backend,
-            model = %model,
-            "built agent loop dependencies"
-        );
+        let clients = self.build_provider_clients().await?;
 
         let hook_runner = crate::hooks::HookRunner::default();
         let hooks: Arc<dyn crate::agent_loop::AgentHooks> =
@@ -1003,7 +1108,7 @@ impl<'a> SessionExecutionService<'a> {
 
         let subagent_tool_runtime = Arc::new(tool_runtime.clone());
         let mut agent = AgentLoop::with_history(
-            client,
+            clients.primary,
             tool_runtime,
             AgentLoopConfig {
                 system_prompt: Some(system_prompt),
@@ -1042,54 +1147,11 @@ impl<'a> SessionExecutionService<'a> {
             agent.set_lua_runtime(runtime);
         }
 
-        // Set up tool provider routing if configured
-        if let Some(tp) = &self.loaded.config.tool_provider {
-            let tp_cb = tp.circuit_breaker.as_ref();
-            let tool_client = genesis_provider::client_from_config_with_circuit_breaker(
-                &tp.backend,
-                &tp.model,
-                tp.base_url.as_deref(),
-                tp.api_key_env.as_deref(),
-                tp_cb.map(|c| c.failure_threshold),
-                tp_cb.map(|c| c.cooldown_secs),
-            )
-            .await?;
+        if let Some(tool_client) = clients.tool_client {
             agent.set_tool_client(tool_client);
-            debug!(
-                tool_provider_backend = %tp.backend,
-                tool_model = %tp.model,
-                "multi-provider routing enabled"
-            );
         }
-
-        // Set up fallback providers for automatic failover (sequential, config order).
-        if !self.loaded.config.fallback_providers.is_empty() {
-            use std::time::Duration;
-
-            let default_timeout = Duration::from_secs(30);
-            let mut fallbacks = Vec::new();
-            for fp in &self.loaded.config.fallback_providers {
-                let fb_cb = fp.circuit_breaker.as_ref();
-                let fb_client = genesis_provider::client_from_config_with_circuit_breaker(
-                    &fp.backend,
-                    &fp.model,
-                    fp.base_url.as_deref(),
-                    fp.api_key_env.as_deref(),
-                    fb_cb.map(|c| c.failure_threshold),
-                    fb_cb.map(|c| c.cooldown_secs),
-                )
-                .await?;
-                let timeout = fp
-                    .timeout_secs
-                    .map(Duration::from_secs)
-                    .unwrap_or(default_timeout);
-                fallbacks.push((fb_client, timeout));
-            }
-            agent.set_fallback_clients(fallbacks);
-            debug!(
-                fallback_count = self.loaded.config.fallback_providers.len(),
-                "provider failover enabled"
-            );
+        if !clients.fallbacks.is_empty() {
+            agent.set_fallback_clients(clients.fallbacks);
         }
 
         // Attach subagent spawner so agent can spawn parallel workstreams
@@ -1502,7 +1564,8 @@ struct ExecutionSubagentSpawner {
 
 impl ExecutionSubagentSpawner {
     fn build_lua_runtime(&self, child_session_id: &str) -> Option<Arc<LuaRuntime>> {
-        if !plugins_enabled(self.loaded.as_ref(), self.plugin_runtime_overrides) {
+        let is_enabled = plugins_enabled(self.loaded.as_ref(), self.plugin_runtime_overrides);
+        if !is_enabled {
             return None;
         }
 
@@ -1514,42 +1577,14 @@ impl ExecutionSubagentSpawner {
             ),
         };
 
-        let mut config_values = BTreeMap::new();
-        config_values.insert("profile".to_owned(), self.loaded.config.profile.clone());
-        config_values.insert("provider_backend".to_owned(), backend.to_owned());
-        config_values.insert("provider_model".to_owned(), model.to_owned());
-        config_values.insert("delivery_platform".to_owned(), "cli".to_owned());
-        config_values.insert(
-            "plugins_enabled".to_owned(),
-            plugins_enabled(self.loaded.as_ref(), self.plugin_runtime_overrides).to_string(),
-        );
-        config_values.insert(
-            "plugin_hook_timeout_ms".to_owned(),
-            self.loaded.config.plugins.hook_timeout_ms.to_string(),
-        );
-        config_values.insert(
-            "plugin_tool_timeout_ms".to_owned(),
-            self.loaded.config.plugins.tool_timeout_ms.to_string(),
-        );
-        config_values.insert(
-            "plugin_auto_disable_after".to_owned(),
-            self.loaded.config.plugins.auto_disable_after.to_string(),
-        );
-        config_values.insert(
-            "data_dir".to_owned(),
-            self.loaded.paths.data_dir.to_string_lossy().into_owned(),
-        );
-        config_values.insert(
-            "database_path".to_owned(),
-            self.loaded
-                .paths
-                .database_path
-                .to_string_lossy()
-                .into_owned(),
-        );
-        config_values.insert(
-            "plugin_dir".to_owned(),
-            self.loaded.paths.plugin_dir.to_string_lossy().into_owned(),
+        let config_values = build_lua_config_values(
+            &self.loaded,
+            &self.loaded.config.profile,
+            backend,
+            model,
+            "cli",
+            is_enabled,
+            None,
         );
 
         let config = LuaRuntimeConfig {

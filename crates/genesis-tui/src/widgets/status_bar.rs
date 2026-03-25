@@ -529,8 +529,10 @@ impl StatusBarWidget {
             Color::Rgb(255, 100, 100) // red — critical
         } else if self.context_percent >= 75 {
             Color::Rgb(255, 200, 80) // yellow — warning
+        } else if self.context_percent <= 50 {
+            Color::Rgb(100, 200, 100) // green — healthy
         } else {
-            self.palette.dim
+            self.palette.dim // neutral (51-74%)
         };
         spans.push(Span::styled(ctx, Style::default().fg(ctx_color).bg(bg)));
 
