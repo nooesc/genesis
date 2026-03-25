@@ -330,6 +330,45 @@ impl ChatWidget {
         }
     }
 
+    /// Return styled lines for in-progress tool calls in the active cell.
+    ///
+    /// Shows a single summary line for tool calls being executed, so the
+    /// user sees activity in the chat area during tool execution (not just
+    /// in the status bar).
+    fn active_tool_lines(&self) -> Vec<Line<'static>> {
+        let cell = match &self.active_cell {
+            Some(c) if !c.tool_calls.is_empty() => c,
+            _ => return Vec::new(),
+        };
+        let dim = Style::default().fg(self.theme_dim);
+        let accent = Style::default().fg(self.theme_accent);
+        let ok_color = Style::default().fg(ratatui::style::Color::Rgb(100, 200, 100));
+        let prefix_indent = "     "; // matches "eve> " width
+
+        let mut lines = Vec::new();
+        for tc in &cell.tool_calls {
+            let (icon, icon_style) = match tc.success {
+                Some(true) => ("\u{2713} ", ok_color), // ✓
+                Some(false) => (
+                    "\u{2717} ",
+                    Style::default().fg(ratatui::style::Color::Rgb(200, 100, 100)),
+                ),
+                None => ("\u{2022} ", accent), // • (running)
+            };
+            let dur = tc
+                .duration
+                .map(|d| format!(" {:.1}s", d.as_secs_f64()))
+                .unwrap_or_default();
+            lines.push(Line::from(vec![
+                Span::raw(prefix_indent.to_owned()),
+                Span::styled(icon.to_owned(), icon_style),
+                Span::styled(tc.tool_name.clone(), dim),
+                Span::styled(dur, dim),
+            ]));
+        }
+        lines
+    }
+
     /// Record a tool call starting in the active cell.
     ///
     /// If no turn is active, this is a no-op.
@@ -835,6 +874,30 @@ impl ChatWidget {
 
                 active_cell_rows = visible_rows;
                 remaining_rows -= visible_rows;
+            }
+        }
+
+        // ── In-progress tool call indicators ─────────────────────────
+        // Show active tool calls below committed cells but above the
+        // streaming text, so users see tool activity in the chat area.
+        if !self.scroll_locked {
+            let tool_lines = self.active_tool_lines();
+            let tool_rows = tool_lines.len() as u16;
+            if tool_rows > 0 && remaining_rows > 0 {
+                let usable = tool_rows.min(remaining_rows);
+                let tool_y = bottom_y - active_cell_rows - usable;
+                let tool_area = Rect {
+                    x: area.x,
+                    y: tool_y,
+                    width: area.width,
+                    height: usable,
+                };
+                // Only show the last `usable` lines if there are more tools than rows.
+                let skip = tool_lines.len().saturating_sub(usable as usize);
+                let visible_lines: Vec<Line<'_>> = tool_lines.into_iter().skip(skip).collect();
+                Paragraph::new(visible_lines).render(tool_area, buf);
+                active_cell_rows += usable;
+                remaining_rows -= usable;
             }
         }
 
