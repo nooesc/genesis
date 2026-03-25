@@ -17,20 +17,8 @@ const RING_RADII: Record<number, number> = {
   [COMMAND_MAP_RINGS.alert]: 510,
 }
 
-const RING_LAYERS: Record<number, CommandMapNodeLayer> = {
-  [COMMAND_MAP_RINGS.core]: 'core',
-  [COMMAND_MAP_RINGS.execution]: 'execution',
-  [COMMAND_MAP_RINGS.recipe]: 'recipe',
-  [COMMAND_MAP_RINGS.system]: 'system',
-  [COMMAND_MAP_RINGS.alert]: 'alert',
-}
-
 export function ringRadius(ring: number): number {
   return RING_RADII[ring] ?? 190 + ring * 110
-}
-
-export function ringLayer(ring: number): CommandMapNodeLayer {
-  return RING_LAYERS[ring] ?? 'system'
 }
 
 export function orderForLayout(nodes: CommandMapNode[]): CommandMapNode[] {

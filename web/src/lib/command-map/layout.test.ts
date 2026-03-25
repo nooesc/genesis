@@ -1,5 +1,6 @@
+import * as layout from './layout'
 import { describe, expect, it } from 'vitest'
-import { applyCommandMapLayout, COMMAND_MAP_RINGS, ringLayer } from './layout'
+import { applyCommandMapLayout, COMMAND_MAP_RINGS, orderForLayout } from './layout'
 import type { CommandMapNode } from './types'
 
 const baseNodes: CommandMapNode[] = [
@@ -42,8 +43,33 @@ const baseNodes: CommandMapNode[] = [
 ]
 
 describe('applyCommandMapLayout', () => {
-  it('maps the recipe ring to the recipe layer', () => {
-    expect(ringLayer(COMMAND_MAP_RINGS.recipe)).toBe('recipe')
+  it('does not export a reverse ring-to-layer helper', () => {
+    expect((layout as Record<string, unknown>).ringLayer).toBeUndefined()
+  })
+
+  it('orders trigger and recipe nodes by explicit layer within the shared middle ring', () => {
+    const ordered = orderForLayout([
+      {
+        id: 'skill-deploy-service',
+        kind: 'recipe',
+        layer: 'recipe',
+        ring: COMMAND_MAP_RINGS.recipe,
+        label: 'deploy-service',
+        status: 'ok',
+        position: { x: 0, y: 0 },
+      },
+      {
+        id: 'schedule-nightly',
+        kind: 'trigger',
+        layer: 'trigger',
+        ring: COMMAND_MAP_RINGS.trigger,
+        label: 'nightly',
+        status: 'ok',
+        position: { x: 0, y: 0 },
+      },
+    ])
+
+    expect(ordered.map(node => node.kind)).toEqual(['trigger', 'recipe'])
   })
 
   it('uses pinned positions instead of auto-layout positions', () => {
